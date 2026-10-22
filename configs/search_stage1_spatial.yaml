@@ -1,5 +1,13 @@
 # Stage 1: Spatial Parameter Search Configuration (NSGA-II on ImageNet-100)
 
+data:
+  dataset: "ImageNet-100"
+  num_classes: 100
+  huggingface:
+    enabled: true
+    dataset_name: "clane9/imagenet-100"
+    streaming: false # Set true for zero-wait on-the-fly streaming
+
 search:
   stage: "spatial"
   population_size: 32

@@ -44,3 +44,7 @@ data:
   num_classes: 100
   input_resolution: [224, 224]
   num_workers: 4
+  huggingface:
+    enabled: true
+    dataset_name: "clane9/imagenet-100"
+    streaming: false # Set true for zero-wait on-the-fly streaming
