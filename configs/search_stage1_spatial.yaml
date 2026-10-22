@@ -1,0 +1,35 @@
+# Stage 1: Spatial Parameter Search Configuration (NSGA-II on ImageNet-100)
+
+search:
+  stage: "spatial"
+  population_size: 32
+  generations: 20
+  crossover_prob: 0.8
+  mutation_prob: 0.2
+  eta_crossover: 15.0
+  eta_mutation: 20.0
+
+bounds:
+  r_rel: [0.005, 0.030]       # Subcortical center receptive field radius relative to H
+  r_fovea: [0.050, 0.300]     # Relative foveation boundary radius
+  r_norm: [0.010, 0.080]      # Divisive contrast normalization radius
+  alpha_fovea: [0.25, 0.75]   # Central foveal magnification factor
+  gamma_periph: [1.2, 2.5]    # Peripheral compression exponent
+
+proxy_adaptation:
+  num_steps: 15
+  batch_size: 128
+  optimizer: "AdamW"
+  lr: 0.0005
+  weight_decay: 0.0001
+  warm_start_checkpoint: null
+
+anti_bias:
+  protocol: "saliency_guided_jitter"
+  saccadic_sigma: 0.08        # Gaussian jitter standard deviation around centroid
+
+profiling:
+  benchmark_resolution: [1080, 1920]
+  timing_warmup_iterations: 10
+  timing_benchmark_iterations: 50
+  mixed_precision: true

@@ -1,0 +1,23 @@
+# Stage 2: Temporal Parameter Search Configuration (CamVid Video Sequences)
+
+search:
+  stage: "temporal"
+  population_size: 16
+  generations: 10
+  crossover_prob: 0.8
+  mutation_prob: 0.25
+
+video_dataset:
+  name: "CamVid"
+  clip_length: 8               # Sequential frame count per clip
+  frame_resolution: [360, 480]
+  batch_size: 16               # Fits comfortably within 5.4 GB VRAM
+
+bounds:
+  delta_threshold: [0.02, 0.20]       # Feature delta sensitivity threshold vartheta
+  state_reuse_threshold: [0.05, 0.25] # Global motion reuse threshold tau_reuse
+
+temporal_gating:
+  feature_stage: "layer2"             # ResNet Layer 2 feature-space gating
+  norm_type: "frobenius"              # Normalized Frobenius distance
+  bypass_stages: ["layer3", "layer4"] # ResNet Stages bypassed upon state reuse
