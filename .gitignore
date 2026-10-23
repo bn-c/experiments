@@ -8,6 +8,9 @@ data/
 *.log
 
 outputs/
+samples/
 *.jpg
+*.jpeg
+*.png
 *.mp4
 *.gif

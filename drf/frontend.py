@@ -49,6 +49,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .kernels import create_dog_kernel_2d, create_gaussian_kernel_2d, safe_spatial_shift
+
 
 # ---------------------------------------------------------------------------
 # Causal State Buffer
@@ -70,76 +72,6 @@ class DRFState(NamedTuple):
     y_prev: torch.Tensor
     s_prev: torch.Tensor
     abs_t_prev: Optional[torch.Tensor]
-
-
-# ---------------------------------------------------------------------------
-# Kernel factory helpers
-# ---------------------------------------------------------------------------
-
-def create_gaussian_kernel_2d(
-    kernel_size: int,
-    sigma: float,
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None
-) -> torch.Tensor:
-    """Creates a normalised 2D Gaussian kernel of shape (1, 1, K, K)."""
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    half = kernel_size // 2
-    coords = torch.linspace(-half, half, kernel_size, device=device, dtype=dtype or torch.float32)
-    y, x = torch.meshgrid(coords, coords, indexing="ij")
-    r_sq = x ** 2 + y ** 2
-    sigma_sq = max(float(sigma) ** 2, 1e-6)
-    kernel = torch.exp(-0.5 * r_sq / sigma_sq)
-    kernel = kernel / (kernel.sum() + 1e-8)
-    return kernel.unsqueeze(0).unsqueeze(0)
-
-
-def create_dog_kernel_2d(
-    kernel_size: int,
-    sigma_center: float,
-    sigma_surround: float,
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None
-) -> torch.Tensor:
-    """Creates a zero-mean normalised Difference-of-Gaussians kernel (1, 1, K, K)."""
-    g_c = create_gaussian_kernel_2d(kernel_size, sigma_center, device=device, dtype=dtype)
-    g_s = create_gaussian_kernel_2d(kernel_size, sigma_surround, device=device, dtype=dtype)
-    dog = g_c - g_s
-    dog = dog - dog.mean()
-    norm = torch.sqrt(torch.sum(dog ** 2) + 1e-8)
-    return dog / norm
-
-
-def safe_spatial_shift(
-    x: torch.Tensor,
-    dx: int,
-    dy: int,
-    mode: str = "replicate"
-) -> torch.Tensor:
-    """
-    Spatially shifts a tensor by (dx, dy) with replicate padding.
-    Avoids circular wrap-around artifacts that torch.roll introduces at frame borders.
-
-    Convention:
-        dx > 0: content shifts right  (position x receives value from x - dx).
-        dx < 0: content shifts left   (position x receives value from x + |dx|).
-        dy > 0: content shifts down   (position y receives value from y - dy).
-        dy < 0: content shifts up     (position y receives value from y + |dy|).
-    """
-    if dx == 0 and dy == 0:
-        return x
-
-    pad_l = max(0, dx)
-    pad_r = max(0, -dx)
-    pad_t = max(0, dy)
-    pad_b = max(0, -dy)
-
-    padded = F.pad(x, (pad_l, pad_r, pad_t, pad_b), mode=mode)
-    h, w = x.shape[-2:]
-    start_x = max(0, -dx)
-    start_y = max(0, -dy)
-    return padded[..., start_y:start_y + h, start_x:start_x + w]
 
 
 # ---------------------------------------------------------------------------
