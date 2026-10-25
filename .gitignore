@@ -8,6 +8,10 @@ data/
 *.log
 
 outputs/
+third_party/enso/.venv/
+third_party/enso/data/
+third_party/enso/checkpoints/
+third_party/enso/wandb/
 samples/
 *.jpg
 *.jpeg
