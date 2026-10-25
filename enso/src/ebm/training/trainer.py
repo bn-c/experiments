@@ -1,6 +1,7 @@
 """Training loop for Sudoku JEPA."""
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,6 +124,8 @@ class Trainer:
         if self.start_epoch >= self.train_cfg.epochs:
             return
 
+        self._last_ckpt_time = time.monotonic()
+
         with logging_redirect_tqdm():
             epoch_bar = tqdm(
                 range(self.start_epoch, self.train_cfg.epochs),
@@ -135,16 +138,7 @@ class Trainer:
                 val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
 
                 log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
-                ckpt_data = _CheckpointData(
-                    model=self.model,
-                    optimizer=self.optimizer,
-                    epoch=epoch,
-                    step=self.global_step,
-                    val_energy=val_energy,
-                    cell_accuracy=cell_acc,
-                )
-                self.checkpoint_mgr.save(ckpt_data)
-                self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
+                self._persist_checkpoint_if_due(epoch, val_energy, cell_acc)
 
                 summary = (
                     f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '
@@ -174,6 +168,30 @@ class Trainer:
         if best:
             upload_checkpoint_to_wandb(best)
         finish_wandb()
+
+    def _checkpoint_due(self) -> bool:
+        return time.monotonic() - self._last_ckpt_time >= self.train_cfg.checkpoint_interval_sec
+
+    def _persist_checkpoint_if_due(self, epoch: int, val_energy: float, cell_acc: float) -> None:
+        if not self._checkpoint_due():
+            return
+        ckpt_data = _CheckpointData(
+            model=self.model,
+            optimizer=self.optimizer,
+            epoch=epoch,
+            step=self.global_step,
+            val_energy=val_energy,
+            cell_accuracy=cell_acc,
+        )
+        self.checkpoint_mgr.save(ckpt_data)
+        self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
+        self._last_ckpt_time = time.monotonic()
+        logger.info(
+            'Checkpoint at epoch %d step %d (cell_acc=%.4f)',
+            epoch,
+            self.global_step,
+            cell_acc,
+        )
 
     def _train_epoch(self, epoch: int) -> float:
         """
@@ -213,6 +231,11 @@ class Trainer:
             n_batches += 1
             self.global_step += 1
             batch_bar.set_postfix(loss=f'{loss_val:.4f}', refresh=False)
+
+            if self._checkpoint_due():
+                val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
+                log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
+                self._persist_checkpoint_if_due(epoch, val_energy, cell_acc)
 
         return total_loss / max(n_batches, 1)
 
