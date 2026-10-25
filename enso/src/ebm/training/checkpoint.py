@@ -84,7 +84,7 @@ class CheckpointManager:
             evicted = heapq.heapreplace(self._heap, entry)
             if evicted.path.exists():
                 evicted.path.unlink()
-                logger.info('Removed checkpoint %s', evicted.path.name)
+                logger.debug('Removed checkpoint %s', evicted.path.name)
             return path
 
         return None
@@ -141,7 +141,7 @@ class CheckpointManager:
             },
             path,
         )
-        logger.info('Saved checkpoint %s (cell_acc=%.4f)', path.name, data.cell_accuracy)
+        logger.debug('Saved checkpoint %s (cell_acc=%.4f)', path.name, data.cell_accuracy)
 
     @staticmethod
     def load(
