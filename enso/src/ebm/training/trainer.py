@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from ebm.model.jepa import SudokuJEPA
 from ebm.training.checkpoint import CheckpointManager, _CheckpointData
@@ -88,36 +89,37 @@ class Trainer:
 
     def train(self) -> None:
         """Run the full training loop for all epochs."""
-        epoch_bar = tqdm(range(self.train_cfg.epochs), desc='epochs')
-        for epoch in epoch_bar:
-            train_loss = self._train_epoch(epoch)
-            val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
+        with logging_redirect_tqdm():
+            epoch_bar = tqdm(range(self.train_cfg.epochs), desc='epochs')
+            for epoch in epoch_bar:
+                train_loss = self._train_epoch(epoch)
+                val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
 
-            log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
-            self.checkpoint_mgr.save(
-                _CheckpointData(
-                    model=self.model,
-                    optimizer=self.optimizer,
-                    epoch=epoch,
-                    step=self.global_step,
-                    val_energy=val_energy,
-                    cell_accuracy=cell_acc,
+                log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
+                self.checkpoint_mgr.save(
+                    _CheckpointData(
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        epoch=epoch,
+                        step=self.global_step,
+                        val_energy=val_energy,
+                        cell_accuracy=cell_acc,
+                    )
                 )
-            )
 
-            summary = (
-                f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '
-                f'cell_acc={cell_acc:.4f} puzzle_acc={puzzle_acc:.4f}'
-            )
-            epoch_bar.set_postfix_str(summary, refresh=False)
-            logger.info(
-                'Epoch %d | train_loss=%.4f | val_energy=%.4f | cell_acc=%.4f | puzzle_acc=%.4f',
-                epoch,
-                train_loss,
-                val_energy,
-                cell_acc,
-                puzzle_acc,
-            )
+                summary = (
+                    f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '
+                    f'cell_acc={cell_acc:.4f} puzzle_acc={puzzle_acc:.4f}'
+                )
+                epoch_bar.set_postfix_str(summary, refresh=False)
+                logger.info(
+                    'Epoch %d | train_loss=%.4f | val_energy=%.4f | cell_acc=%.4f | puzzle_acc=%.4f',
+                    epoch,
+                    train_loss,
+                    val_energy,
+                    cell_acc,
+                    puzzle_acc,
+                )
 
         best = self.checkpoint_mgr.best_path
         if best:
