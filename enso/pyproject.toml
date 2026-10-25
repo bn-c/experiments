@@ -12,8 +12,15 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "scikit-learn>=1.5.0",
+    "tqdm>=4.66.0",
     "torch>=2.4.0",
     "wandb>=0.24.2",
+]
+
+[project.optional-dependencies]
+# AMD ROCm nightly PyTorch; use `uv sync --extra rocm` on an AMD box.
+rocm = [
+    "pytorch-triton-rocm",
 ]
 
 [dependency-groups]
@@ -40,6 +47,18 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "ebm"
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm-nightly" }
+pytorch-triton-rocm = { index = "pytorch-rocm-nightly" }
+
+[tool.uv]
+prerelease = "allow"
+
+[[tool.uv.index]]
+name = "pytorch-rocm-nightly"
+url = "https://download.pytorch.org/whl/nightly/rocm6.4"
+explicit = true
 
 [tool.ruff]
 fix = true

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from ebm.model.jepa import SudokuJEPA
 from ebm.training.checkpoint import CheckpointManager, _CheckpointData
@@ -87,9 +88,10 @@ class Trainer:
 
     def train(self) -> None:
         """Run the full training loop for all epochs."""
-        for epoch in range(self.train_cfg.epochs):
-            train_loss = self._train_epoch()
-            val_energy, cell_acc, puzzle_acc, z_var = self._validate()
+        epoch_bar = tqdm(range(self.train_cfg.epochs), desc='epochs')
+        for epoch in epoch_bar:
+            train_loss = self._train_epoch(epoch)
+            val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
 
             log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
             self.checkpoint_mgr.save(
@@ -103,6 +105,11 @@ class Trainer:
                 )
             )
 
+            summary = (
+                f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '
+                f'cell_acc={cell_acc:.4f} puzzle_acc={puzzle_acc:.4f}'
+            )
+            epoch_bar.set_postfix_str(summary, refresh=False)
             logger.info(
                 'Epoch %d | train_loss=%.4f | val_energy=%.4f | cell_acc=%.4f | puzzle_acc=%.4f',
                 epoch,
@@ -117,7 +124,7 @@ class Trainer:
             upload_checkpoint_to_wandb(best)
         finish_wandb()
 
-    def _train_epoch(self) -> float:
+    def _train_epoch(self, epoch: int) -> float:
         """
         Run one training epoch.
 
@@ -129,7 +136,8 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        for batch in self.train_loader:
+        batch_bar = tqdm(self.train_loader, desc=f'epoch {epoch} train', leave=False)
+        for batch in batch_bar:
             puzzle = batch['puzzle'].to(self.device)
             solution = batch['solution'].to(self.device)
             mask = batch['mask'].to(self.device)
@@ -149,14 +157,16 @@ class Trainer:
             lr = float(self.scheduler.get_last_lr()[0])
             log_train_step(loss_out, lr, momentum, self.global_step)
 
-            total_loss += loss_out.total.item()
+            loss_val = loss_out.total.item()
+            total_loss += loss_val
             n_batches += 1
             self.global_step += 1
+            batch_bar.set_postfix(loss=f'{loss_val:.4f}', refresh=False)
 
         return total_loss / max(n_batches, 1)
 
     @torch.no_grad()
-    def _validate(self) -> tuple[float, float, float, float]:
+    def _validate(self, epoch: int) -> tuple[float, float, float, float]:
         """
         Run validation and compute metrics.
 
@@ -171,7 +181,7 @@ class Trainer:
         all_z_var = 0.0
         n_batches = 0
 
-        for batch in self.val_loader:
+        for batch in tqdm(self.val_loader, desc=f'epoch {epoch} val', leave=False):
             puzzle = batch['puzzle'].to(self.device)
             solution = batch['solution'].to(self.device)
             mask = batch['mask'].to(self.device)
