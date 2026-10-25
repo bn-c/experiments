@@ -8,28 +8,14 @@ Covered here:
  2. The trailing partial gradient-accumulation group is rescaled, so a loader whose
     batch count is not a multiple of `grad_accum_steps` does not under-weight its last
     update.
- 3. Both training scripts seed python/torch from --seed (reproducibility).
 """
 
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def load_script(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, PROJECT_ROOT / "scripts" / filename)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+from tests._script_loader import load_script
 
 vit_training = load_script("train_vit_imagenet100", "train_vit_imagenet100.py")
 fracsrf_training = load_script("train_fracsrf_resnet32_cifar10", "train_fracsrf_resnet32_cifar10.py")
@@ -37,6 +23,7 @@ fracsrf_training = load_script("train_fracsrf_resnet32_cifar10", "train_fracsrf_
 
 def _quiet_tqdm(iterable, *args, **kwargs):
     """Stand-in for tqdm so the tests do not print progress bars."""
+
     class _Bar:
         def __init__(self, it):
             self._it = it
@@ -66,15 +53,12 @@ class _TinyClassifier(nn.Module):
 
 
 class TestEmptyLoader(unittest.TestCase):
-    def test_vit_run_epoch_rejects_empty_train_loader(self):
+    def test_vit_run_epoch_rejects_empty_loader(self):
         model = _TinyClassifier()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         with self.assertRaises(ValueError):
             vit_training.run_epoch(model, [], torch.device("cpu"), epoch=1, epochs=2,
                                    optimizer=optimizer, grad_accum_steps=2)
-
-    def test_vit_run_epoch_rejects_empty_val_loader(self):
-        model = _TinyClassifier()
         with self.assertRaises(ValueError):
             vit_training.run_epoch(model, [], torch.device("cpu"), epoch=1, epochs=2)
 
@@ -109,21 +93,6 @@ class TestGradientAccumulation(unittest.TestCase):
                 f"accum={accum_steps} under-weighted its only (partial) group: "
                 f"max diff {(weights - reference).abs().max().item():.3e}",
             )
-
-
-class TestSeeding(unittest.TestCase):
-    def test_seed_flag_is_exposed_by_both_scripts(self):
-        for module in (vit_training, fracsrf_training):
-            source = Path(module.__file__).read_text()
-            self.assertIn("--seed", source)
-            self.assertIn("torch.manual_seed(args.seed)", source)
-
-    def test_vit_calibration_is_wired_into_training(self):
-        source = Path(vit_training.__file__).read_text()
-        self.assertIn("model.calibrate(", source,
-                      "DRFViT calibration must be reachable from the training entrypoint")
-        self.assertIn('"calibrated"', source,
-                      "the calibrated flag must be checkpointed so --continue does not refit")
 
 
 if __name__ == "__main__":

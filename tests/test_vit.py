@@ -11,16 +11,10 @@ Covers the wiring that the training script depends on:
  7. The default (128, 128) target still streams; a (64, 64) target keeps its field of view.
 """
 
-import sys
-from pathlib import Path
 import unittest
 import warnings
 
 import torch
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from drf import DRFViT, VisionTransformer
 from drf.vit import _rescale_per_channel_01
@@ -118,8 +112,8 @@ class TestDRFViT(unittest.TestCase):
         self.assertTrue(torch.isfinite(out).all())
         self.assertTrue(((out >= 0.0) & (out <= 1.0)).all())
 
-    def test_default_resolution_and_video_frontend(self):
-        """The shipped (128, 128) default must still stream 5-D clips through the front-end."""
+    def test_frontend_streams_five_dimensional_video(self):
+        """The bundled front-end must accept (B, T, 3, H, W) clips and emit per-frame features."""
         model = tiny_vit(drf_resolution=(128, 128), patch_size=16)
         model.eval()
         with torch.no_grad():

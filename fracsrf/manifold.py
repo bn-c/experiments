@@ -610,12 +610,16 @@ class StructuredKNNConv(nn.Module):
             )
 
     def _max_order(self) -> int:
+        if self.nu_x is None:
+            return 1
         with torch.no_grad():
-            orders = [self.MAX_ORDER]
-            if self.nu_x is not None:
-                orders.append(int(self.nu_x.max().clamp_max(float(self.MAX_ORDER)).ceil().item()) + 1)
-                orders.append(int(self.nu_y.max().clamp_max(float(self.MAX_ORDER)).ceil().item()) + 1)
-        return max(1, min(self.MAX_ORDER, max(orders)))
+            order = torch.stack(
+                [
+                    self.nu_x.max().clamp_max(float(self.MAX_ORDER)),
+                    self.nu_y.max().clamp_max(float(self.MAX_ORDER)),
+                ]
+            ).max()
+        return max(1, min(self.MAX_ORDER, int(order.ceil().item()) + 1))
 
     # -- kernels -----------------------------------------------------------------------
 

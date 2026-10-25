@@ -53,6 +53,10 @@ select = ["E", "F", "W", "I", "UP", "B"]
 # E501 is left to the formatter; the model docstrings are deliberately wide.
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/visualize_drf.py" = ["E402"]
+"scripts/check_fovi_mapping.py" = ["E402"]
+
 [[tool.uv.index]]
 name = "pytorch-rocm-nightly"
 url = "https://download.pytorch.org/whl/nightly/rocm6.4"

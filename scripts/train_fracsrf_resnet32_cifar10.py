@@ -14,9 +14,9 @@ import time
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 from datasets import load_dataset
 from PIL import Image
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from fracsrf import FracSRFResNet32

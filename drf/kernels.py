@@ -1,6 +1,5 @@
 """Analytic filter kernels and spatial operators used by the DRF front-end."""
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -9,8 +8,8 @@ import torch.nn.functional as F
 def create_gaussian_kernel_2d(
     kernel_size: int,
     sigma: float,
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None
 ) -> torch.Tensor:
     """Creates a normalised 2D Gaussian kernel of shape (1, 1, K, K)."""
     if kernel_size % 2 == 0:

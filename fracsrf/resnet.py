@@ -6,7 +6,6 @@ Saldanha et al. (BMVC 2021). 1x1 downsample shortcuts and the final linear
 classifier are left as standard layers, matching the paper's Sec. 4.1 setup.
 """
 
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -24,7 +23,7 @@ class FracSRFBasicBlock(nn.Module):
         planes: int,
         stride: int = 1,
         sigma_init: float = 1.0,
-        order_init_range: Tuple[float, float] = (1.0, 3.0),
+        order_init_range: tuple[float, float] = (1.0, 3.0),
         learn_sigma: bool = True,
     ):
         super().__init__()
@@ -57,7 +56,7 @@ class FracSRFResNet32(nn.Module):
         num_classes: int = 10,
         n_blocks: int = 5,
         sigma_init: float = 1.0,
-        order_init_range: Tuple[float, float] = (1.0, 3.0),
+        order_init_range: tuple[float, float] = (1.0, 3.0),
         learn_sigma: bool = True,
     ):
         super().__init__()

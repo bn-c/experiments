@@ -31,15 +31,9 @@ Tests:
 19. Stride-1 decimation is the identity (no needless low-pass when nothing is downsampled).
 """
 
-import sys
-from pathlib import Path
 import unittest
-import torch
 
-# Add project root to sys.path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+import torch
 
 from drf import DRFBiomimeticFrontEnd
 
@@ -89,18 +83,17 @@ class TestDRFBiomimeticFrontEnd(unittest.TestCase):
         Flooring the ratio did exactly that: 255px -> S=1 -> half the frame cropped
         away, 256px -> S=2 -> the whole frame kept.
         """
-        marker = torch.zeros(1, 3, 1, 1)
-        survivals = []
         for n in (254, 255, 256, 257, 510, 511, 512, 513):
             x = torch.zeros(1, 3, n, n)
             span = max(4, n // 40)
             x[:, :, :span, :span] = 1.0          # marker in the far corner
             fe = DRFBiomimeticFrontEnd()
             fe.reset()
-            survives = fe(x)[:, 0].max().item() > 0.05
-            survivals.append(survives)
-            self.assertTrue(survives, f"corner content lost at {n}x{n} (S={fe.compute_geometry(n, n)[0]})")
-        self.assertTrue(all(survivals))
+            self.assertGreater(
+                fe(x)[:, 0].max().item(),
+                0.05,
+                f"corner content lost at {n}x{n} (S={fe.compute_geometry(n, n)[0]})",
+            )
 
     def test_non_default_target_keeps_field_of_view(self):
         """A (64, 64) or (32, 32) front-end must still see the whole frame, not a crop."""
