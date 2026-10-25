@@ -11,7 +11,7 @@ four direction-selective channels, object-motion sensitivity, looming).
 | Path | Contents |
 | --- | --- |
 | [drf/frontend.py](drf/frontend.py) | `DRFBiomimeticFrontEnd`, `DRFState` — the 5-stage model and its causal state machine |
-| [drf/kernels.py](drf/kernels.py) | Analytic Gaussian / DoG kernels and replicate-padded spatial shift |
+| [drf/kernels.py](drf/kernels.py) | Analytic Gaussian kernels and replicate-padded spatial shift |
 | [drf/visualization.py](drf/visualization.py) | Channel colorization and the 4×4 dashboard renderer (needs `numpy`, `Pillow`) |
 | [fracsrf/basis.py](fracsrf/basis.py) | Shared separable Gaussian-derivative basis, used by the Cartesian and manifold filters |
 | [fracsrf/manifold.py](fracsrf/manifold.py) | FOVI-style foveated sensor and `StructuredKNNConv`: dense, structured and analytic kernel mapping |
@@ -37,9 +37,20 @@ The module holds no trainable parameters and runs entirely under `torch.no_grad(
 Temporal state is kept internally; pass an explicit `DRFState` (and `return_state=True`)
 to manage streaming state yourself.
 
-Non-square inputs are replicate-padded to a square (`letterbox=True`, the default)
-before Stage 0, so wide/tall frames keep their full field of view and aspect ratio
-instead of being center-cropped or anisotropically squashed to fit the 128×128 grid.
+Non-square inputs are letterboxed to a square (`letterbox=True`, the default) before
+Stage 0, using a flat bar colour taken once per clip from the first frame's border
+strips. Wide/tall frames therefore keep their full field of view and aspect ratio
+instead of being center-cropped or anisotropically squashed to fit the grid, and the
+padding itself cannot inject motion signals into the temporal channels.
+
+### Geometry
+
+The stride is `S = max(1, round(min(H, W) / max(target_resolution)))`, i.e. it is
+derived from the *configured output grid*, not from a fixed 128 — so a `(64, 64)`
+front-end (what `DRFViT` uses) still down-samples the whole frame rather than
+crop-zooming into its centre. Because `S` is rounded rather than floored, the
+decimated grid lands within ±1/(2S) of the target, so the final grid snap only trims
+or pads a sliver; the retained field of view is continuous in the input size.
 
 ## Running
 

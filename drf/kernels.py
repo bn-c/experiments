@@ -25,22 +25,6 @@ def create_gaussian_kernel_2d(
     return kernel.unsqueeze(0).unsqueeze(0)
 
 
-def create_dog_kernel_2d(
-    kernel_size: int,
-    sigma_center: float,
-    sigma_surround: float,
-    device: Optional[torch.device] = None,
-    dtype: Optional[torch.dtype] = None
-) -> torch.Tensor:
-    """Creates a zero-mean normalised Difference-of-Gaussians kernel (1, 1, K, K)."""
-    g_c = create_gaussian_kernel_2d(kernel_size, sigma_center, device=device, dtype=dtype)
-    g_s = create_gaussian_kernel_2d(kernel_size, sigma_surround, device=device, dtype=dtype)
-    dog = g_c - g_s
-    dog = dog - dog.mean()
-    norm = torch.sqrt(torch.sum(dog ** 2) + 1e-8)
-    return dog / norm
-
-
 def safe_spatial_shift(
     x: torch.Tensor,
     dx: int,

@@ -149,10 +149,12 @@ def create_12_channel_grid(
     draw_canvas = ImageDraw.Draw(canvas)
 
     if header_text:
+        grid_h, grid_w = channels_tensor.shape[-2:]
         draw_canvas.text((15, 15), header_text, fill=(255, 255, 255))
         draw_canvas.text(
             (15, 33),
-            "Dynamic Receptive Field Biomimetic Front-End (12 Retinal Ganglion Channels @ 128x128)",
+            f"Dynamic Receptive Field Biomimetic Front-End "
+            f"(12 Retinal Ganglion Channels @ {grid_w}x{grid_h})",
             fill=(160, 170, 190),
         )
 
