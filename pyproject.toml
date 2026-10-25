@@ -4,12 +4,24 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "torch",
-    "pytorch-triton-rocm",
     "numpy",
     "pillow",
     "datasets",
     "huggingface-hub",
     "tqdm",
+]
+
+[project.optional-dependencies]
+# `scripts/visualize_drf.py --video` decodes video; images only need pillow/numpy.
+video = [
+    "imageio",
+    "imageio-ffmpeg",
+]
+# The AMD ROCm nightly PyTorch build this project is developed against. Kept out of
+# the hard dependencies so `uv sync` still resolves on a CUDA/CPU machine; install it
+# with `uv sync --extra rocm` on an AMD box.
+rocm = [
+    "pytorch-triton-rocm",
 ]
 
 [build-system]
@@ -20,11 +32,26 @@ build-backend = "hatchling.build"
 packages = ["drf", "fracsrf"]
 
 [tool.uv.sources]
+# NOTE: torch is pinned to the ROCm nightly index below because this project is
+# developed on an AMD box. On a CUDA/CPU machine, drop these two lines (or run
+# `uv sync --no-install-package torch` after a plain `pip install torch`).
 torch = { index = "pytorch-rocm-nightly" }
 pytorch-triton-rocm = { index = "pytorch-rocm-nightly" }
 
 [tool.uv]
 prerelease = "allow"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501 is left to the formatter; the model docstrings are deliberately wide.
+ignore = ["E501"]
 
 [[tool.uv.index]]
 name = "pytorch-rocm-nightly"
