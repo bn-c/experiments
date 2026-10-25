@@ -33,6 +33,13 @@ class FracSRFConv2d(nn.Module):
     # negative values noted in the paper's Discussion (Sec. 5).
     MAX_ORDER = 10
 
+    # Clip sigma to this range. The kernel footprint is ~(4*sigma+1)^2 and is built
+    # from only 3 scalars per (out, in) pair, so an unclamped learned sigma can turn
+    # a cheap structured layer into an enormous dense convolution (sigma=30 gives a
+    # 123x123 kernel) without any parameter-count signal that this is happening.
+    MIN_SIGMA = 0.25
+    MAX_SIGMA = 8.0
+
     def __init__(
         self,
         in_channels: int,
@@ -50,7 +57,7 @@ class FracSRFConv2d(nn.Module):
 
         # sigma > 0 is enforced by learning its log (avoids negative-sigma gradients).
         self.log_sigma = nn.Parameter(
-            torch.tensor(math.log(sigma_init), dtype=torch.float32),
+            torch.tensor(math.log(min(max(sigma_init, self.MIN_SIGMA), self.MAX_SIGMA)), dtype=torch.float32),
             requires_grad=learn_sigma,
         )
 
@@ -58,22 +65,55 @@ class FracSRFConv2d(nn.Module):
         self.nu_x = nn.Parameter(torch.empty(out_channels, in_channels).uniform_(lo, hi))
         self.nu_y = nn.Parameter(torch.empty(out_channels, in_channels).uniform_(lo, hi))
 
-        fan_in = in_channels
-        self.alpha = nn.Parameter(
-            torch.empty(out_channels, in_channels).normal_(0.0, 1.0 / math.sqrt(fan_in))
-        )
-
+        self.alpha = nn.Parameter(torch.empty(out_channels, in_channels))
         self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
+
+        self._init_alpha()
+
+    def _init_alpha(self) -> None:
+        """
+        Scale the per-kernel amplitude so a freshly built layer is variance-preserving
+        like a Kaiming-initialised dense conv.
+
+        alpha ~ N(0, 1/sqrt(fan_in)) alone is not enough here: the structured kernel is
+        a Gaussian-derivative basis whose L2 norm is far below 1, so the same alpha
+        yields activations roughly 7x smaller than a dense conv's. The basis energy is
+        measured once at init (it does not depend on alpha) and folded into the scale.
+        """
+        with torch.no_grad():
+            self.alpha.fill_(1.0)                                 # unit amplitude
+            kernel, _ = self._build_kernel()                      # basis energy per kernel
+            basis_energy = kernel.pow(2).sum(dim=(-1, -2)).clamp_min(1e-12)   # (out, in)
+            # Kaiming-style fan-in gain, divided by the basis energy.
+            std = torch.sqrt((2.0 / max(self.in_channels, 1)) / basis_energy)
+            self.alpha.copy_(torch.randn_like(self.alpha) * std)
 
     @property
     def sigma(self) -> torch.Tensor:
-        return self.log_sigma.exp()
+        """Effective sigma, clipped to [MIN_SIGMA, MAX_SIGMA] (see the class docstring)."""
+        return self.log_sigma.clamp(math.log(self.MIN_SIGMA), math.log(self.MAX_SIGMA)).exp()
 
     def clip_orders_(self) -> None:
         """In-place clamp of nu_x/nu_y into [0, MAX_ORDER]; call after optimizer.step()."""
         with torch.no_grad():
             self.nu_x.clamp_(0.0, self.MAX_ORDER)
             self.nu_y.clamp_(0.0, self.MAX_ORDER)
+
+    def clip_sigma_(self) -> None:
+        """
+        In-place clamp of log_sigma into [log(MIN_SIGMA), log(MAX_SIGMA)].
+
+        `sigma` already clips on read, so the forward pass is safe either way; clamping
+        the parameter keeps a runaway sigma from sitting in the checkpoint forever and
+        from soaking up the whole learning rate budget.
+        """
+        with torch.no_grad():
+            self.log_sigma.clamp_(math.log(self.MIN_SIGMA), math.log(self.MAX_SIGMA))
+
+    def clip_params_(self) -> None:
+        """Convenience: clip orders and sigma. Call after each optimizer.step()."""
+        self.clip_orders_()
+        self.clip_sigma_()
 
     @staticmethod
     def _hermite_gaussian_basis(
@@ -89,13 +129,21 @@ class FracSRFConv2d(nn.Module):
 
     def _build_kernel(self) -> Tuple[torch.Tensor, int]:
         sigma = self.sigma
+        # The spatial extent and the Hermite order are integers, so they are read back
+        # from the parameters. Both are taken in ONE host sync (a stacked .tolist())
+        # rather than two separate .item() calls: this runs once per layer per forward
+        # pass, i.e. 31 layers x 2 syncs serialising every step on the GPU previously.
+        # The order must be the max over BOTH axes: _interpolate_order clips nu to
+        # max_order - 1e-4, so deriving it from nu_x alone would silently truncate nu_y.
+        sigma_v, order_x, order_y = torch.stack([
+            sigma.detach().clamp_max(float(self.MAX_SIGMA)),
+            self.nu_x.detach().max().clamp_max(float(self.MAX_ORDER)),
+            self.nu_y.detach().max().clamp_max(float(self.MAX_ORDER)),
+        ]).tolist()
+
         # Spatial extent ~2*sigma around the center, per the paper's setup.
-        radius = max(1, int(math.ceil(2.0 * sigma.item())))
-        max_order = min(
-            self.MAX_ORDER,
-            int(math.ceil(max(self.nu_x.max().item(), self.nu_y.max().item()))) + 1,
-        )
-        max_order = max(max_order, 1)
+        radius = max(1, int(math.ceil(2.0 * sigma_v)))
+        max_order = max(1, min(self.MAX_ORDER, int(math.ceil(max(order_x, order_y))) + 1))
 
         coords = torch.arange(-radius, radius + 1, device=sigma.device, dtype=sigma.dtype)
         basis = self._hermite_gaussian_basis(coords, sigma, max_order)  # (max_order+1, K)

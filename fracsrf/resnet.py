@@ -96,10 +96,14 @@ class FracSRFResNet32(nn.Module):
         return self.fc(out)
 
     def clip_orders_(self) -> None:
-        """Clamp all FracSRF layers' fractional orders in-place; call after optimizer.step()."""
+        """
+        Clamp all FracSRF layers' fractional orders *and* sigmas in-place; call after
+        optimizer.step(). Orders are clipped to [0, MAX_ORDER] and sigma to
+        [MIN_SIGMA, MAX_SIGMA], which bounds the structured kernel's footprint.
+        """
         for m in self.modules():
             if isinstance(m, FracSRFConv2d):
-                m.clip_orders_()
+                m.clip_params_()
 
     def sigma_parameters(self):
         """Yields the per-layer learnable `sigma` (log_sigma) parameters, for a separate
