@@ -33,9 +33,27 @@ The module holds no trainable parameters and runs entirely under `torch.no_grad(
 Temporal state is kept internally; pass an explicit `DRFState` (and `return_state=True`)
 to manage streaming state yourself.
 
+Non-square inputs are replicate-padded to a square (`letterbox=True`, the default)
+before Stage 0, so wide/tall frames keep their full field of view and aspect ratio
+instead of being center-cropped or anisotropically squashed to fit the 128×128 grid.
+
 ## Running
 
 ```bash
 python -m unittest discover tests
 python scripts/visualize_drf.py --image sample.jpg --video clip.mp4
 ```
+
+## ViT training (ROCm)
+
+[drf/vit.py](drf/vit.py) feeds the DRF front-end's `(B, 12, 64, 64)` output into a small
+ViT (`DRFViT`) and [scripts/train_vit_imagenet100.py](scripts/train_vit_imagenet100.py)
+trains it on the Hugging Face `clane9/imagenet-100` subset. Dependencies (including an
+AMD ROCm nightly build of PyTorch, installed from `download.pytorch.org`'s wheel index
+rather than built from source) are managed with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+uv run python scripts/train_vit_imagenet100.py --epochs 30 --batch-size 128
+```
+

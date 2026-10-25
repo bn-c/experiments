@@ -16,6 +16,11 @@ Tests:
 12. State tensor memory: detach().clone() breaks parent storage reference.
 13. OMS delayed surround: motion channels active at t=1 for a moving stimulus.
 14. Numerical stability under edge cases (all zeros, all ones, extreme contrast).
+15. Border-artifact free: spatial filters replicate-pad, so a uniform field produces
+    no spurious edge response at the frame boundary.
+16. Letterboxing: non-square (wide/tall) inputs are padded to a square before Stage 0,
+    so far-edge content survives instead of being center-cropped away.
+17. Letterbox bars are flat (mean-filled), not streaked copies of a textured border row.
 """
 
 import sys
@@ -75,6 +80,48 @@ class TestDRFBiomimeticFrontEnd(unittest.TestCase):
             self.assertFalse(torch.isinf(out).any())
 
     # ------------------------------------------------------------------
+    # 16. Letterboxing preserves far-edge content on wide/tall inputs
+    # ------------------------------------------------------------------
+    def test_letterbox_preserves_wide_aspect_ratio_content(self):
+        """
+        A bright marker near the far edge of a 16:9 frame must still show up in the
+        output. With letterbox=False (legacy crop_pad-only scaling), the marker is
+        center-cropped away; with letterbox=True (default) it must survive.
+        """
+        x = torch.zeros(1, 3, 1080, 1920)
+        x[:, :, 500:580, 20:100] = 1.0  # near the far-left edge of a wide frame
+
+        letterboxed = DRFBiomimeticFrontEnd(letterbox=True)
+        letterboxed.reset()
+        out_letterboxed = letterboxed(x)
+        self.assertGreater(out_letterboxed[:, 0].max().item(), 0.0,
+                           "Letterboxed model must preserve far-edge content")
+
+        cropped = DRFBiomimeticFrontEnd(letterbox=False)
+        cropped.reset()
+        out_cropped = cropped(x)
+        self.assertAlmostEqual(out_cropped[:, 0].max().item(), 0.0, places=4,
+                               msg="Non-letterboxed model center-crops the marker away")
+
+    # ------------------------------------------------------------------
+    # 17. Letterbox bars are flat, not streaked
+    # ------------------------------------------------------------------
+    def test_letterbox_bars_are_flat_not_streaked(self):
+        """
+        A textured border row/column must not be replicated verbatim down the letterbox
+        bar (which would stripe its per-column/per-row texture into streaks); the bar
+        must be a flat mean-color fill instead.
+        """
+        x = torch.rand(1, 3, 1080, 1920)  # high-frequency texture reaches every edge
+        padded = DRFBiomimeticFrontEnd._letterbox_to_square(x)
+        self.assertEqual(padded.shape[-2:], (1920, 1920))
+
+        bar_top = padded[:, :, :420, :]  # letterbox bar added above the real content
+        # A flat fill has ~zero variance across the bar; a replicated textured row would not.
+        self.assertLess(bar_top.var(dim=(-2, -1)).max().item(), 1e-6,
+                        "Letterbox bar must be a flat fill, not a replicated textured row")
+
+    # ------------------------------------------------------------------
     # 4. Dual-regime state machine
     # ------------------------------------------------------------------
     def test_dual_regime_static_vs_temporal(self):
@@ -119,17 +166,25 @@ class TestDRFBiomimeticFrontEnd(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_bipolar_chromatic_and_transient_polarity(self):
         """CHROMA_RG, CHROMA_BY, and TRANSIENT must preserve correct sign for opponent colors."""
+        # CHROMA_RG/BY are DoG (high-pass) filtered, so a spatially uniform color field
+        # must sit at zero; use a colored square against a neutral background instead
+        # so the center–surround filter actually has contrast to respond to. The square
+        # is cropped in *output* (128x128) coordinates since Stage 4 decimates by stride S.
+        out_crop = slice(54, 74)
         self.frontend.reset()
-        red = torch.zeros(1, 3, 256, 256)
-        red[:, 0] = 1.0
+        red = torch.full((1, 3, 256, 256), 0.5)
+        red[:, 0, 108:148, 108:148] = 1.0
+        red[:, 1:, 108:148, 108:148] = 0.0
         out_red = self.frontend(red)
-        self.assertGreater(out_red[:, 1].mean().item(), 0.0, "Pure red should give RG > 0")
+        self.assertGreater(out_red[:, 1, out_crop, out_crop].mean().item(), 0.0, "Red square should give RG > 0")
 
         self.frontend.reset()
-        green = torch.zeros(1, 3, 256, 256)
-        green[:, 1] = 1.0
+        green = torch.full((1, 3, 256, 256), 0.5)
+        green[:, 1, 108:148, 108:148] = 1.0
+        green[:, 0, 108:148, 108:148] = 0.0
+        green[:, 2, 108:148, 108:148] = 0.0
         out_green = self.frontend(green)
-        self.assertLess(out_green[:, 1].mean().item(), 0.0, "Pure green should give RG < 0")
+        self.assertLess(out_green[:, 1, out_crop, out_crop].mean().item(), 0.0, "Green square should give RG < 0")
 
         # Brightening -> positive transient
         self.frontend.reset()
@@ -310,6 +365,26 @@ class TestDRFBiomimeticFrontEnd(unittest.TestCase):
             out = self.frontend(torch.full((1, 3, 256, 256), val))
             self.assertFalse(torch.isnan(out).any(), f"NaN at val={val}")
             self.assertFalse(torch.isinf(out).any(), f"Inf at val={val}")
+
+    # ------------------------------------------------------------------
+    # 15. Border-artifact free spatial filtering
+    # ------------------------------------------------------------------
+    def test_no_spurious_border_response_on_uniform_field(self):
+        """
+        A spatially uniform frame has zero contrast everywhere, including at the
+        frame border. DoG/OMS/BlurPool convolutions must replicate-pad (not
+        zero-pad) so edge pixels aren't misread as a dark border artifact.
+        """
+        self.frontend.reset()
+        out = self.frontend(torch.full((1, 3, 256, 256), 0.5))
+        # SUBUNIT_ON/OFF (Ch 3-4) are a high-pass DoG response: must be ~0 even
+        # at the outermost ring of the output grid, where border padding would bite.
+        border = torch.cat(
+            [out[:, 3:5, 0, :], out[:, 3:5, -1, :], out[:, 3:5, :, 0], out[:, 3:5, :, -1]],
+            dim=-1,
+        )
+        self.assertLess(border.abs().max().item(), 1e-3,
+                        "High-pass channels must be ~0 at the border for a uniform field")
 
 
 if __name__ == "__main__":

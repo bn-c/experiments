@@ -17,28 +17,27 @@ Key properties:
 - Polarity Preservation: Signed decimation for chromatic and transient bipolar channels.
 - Anti-Aliasing Fidelity: Nyquist-scaled BlurPool filter matched to dynamic stride S.
 - Fast Execution: Device-aware LRU filter cache; auto-cleared on .to() / .cuda() calls.
-- Correct Normalization: Separate divisive normalization pools for parvocellular (Ch 0-4)
-  and magnocellular (Ch 5-11) pathways matching IPL laminar segregation.
+- Bounded Range: No DoG center-surround or divisive normalization stage, so every
+  channel is a fixed, analytically-bounded function of the [0, 1] RGB input (a single
+  Gaussian blur is a convex combination of in-range pixels, so it can't leave [0, 1];
+  unlike DoG's difference-of-Gaussians, which has no fixed output range).
 - Expansion-Selective Looming: OFF_T center-surround competition suppresses global darkening
   while preserving genuine collision/approach responses.
 - Biphasic Transient: Two-timescale temporal kernel (fast excitation - slow inhibitory rebound)
   approximates the biphasic M-pathway bipolar cell response (Baccus & Meister 2002).
 - OMS Delayed Surround: |T_{t-1}| used as surround reference for object-motion sensitivity
   matching polyaxonal amacrine cell synaptic delay (Baccus et al. 2008).
-- Chromatic DoG: Mild spatial center-surround applied to RG and BY opponent channels,
-  matching parvocellular midget bipolar cell spatial filtering.
+- Raw Chromatic Opponency: RG and BY opponent channels are passed through unfiltered
+  (no spatial filtering), unlike the achromatic pathway's single-Gaussian highpass.
 - BT.709 Luminance: Updated from BT.601 to ITU-R BT.709/sRGB D65 luminance axis.
 
 References:
-- Enroth-Cugell & Robson, 1966 (DoG receptive fields)
 - Barlow & Levick, 1965 (DSGC delay-inhibit mechanism)
 - Baccus & Meister, 2002 (biphasic M-pathway temporal kernel)
 - Ölveczky, Baccus & Meister, 2003 (OMS retinal detection)
 - Baccus, Ölveczky, Manu & Meister, 2008 (OMS polyaxonal amacrine delay)
 - Münch et al., 2009 (PV5 looming RGC, ON-surround suppression)
 - Derrington, Krauskopf & Lennie, 1984 (DKL color opponency)
-- Heeger, 1992 (divisive normalization)
-- Carandini & Heeger, 2012 (canonical neural normalization)
 - Zhang, 2019 (BlurPool / anti-aliased CNNs)
 - Dapello et al., 2020 (VOneNet fixed V1 front-end for adversarial robustness)
 """
@@ -49,7 +48,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .kernels import create_dog_kernel_2d, create_gaussian_kernel_2d, safe_spatial_shift
+from .kernels import create_gaussian_kernel_2d, safe_spatial_shift
 
 
 # ---------------------------------------------------------------------------
@@ -86,10 +85,10 @@ class DRFBiomimeticFrontEnd(nn.Module):
     (B, 12, 128, 128) biological feature tensor across 12 canonical channels:
 
       0:  SUSTAINED_LUM  — Stationary luminance / structural forms (IIR sustained)
-      1:  CHROMA_RG      — Red vs Green chromatic opponency (L - M), DoG filtered, signed
-      2:  CHROMA_BY      — Blue vs Yellow opponency (S - (L+M)), DoG filtered, signed
-      3:  SUBUNIT_ON     — High-frequency center-surround ON subunit (achromatic)
-      4:  SUBUNIT_OFF    — High-frequency center-surround OFF subunit (achromatic)
+      1:  CHROMA_RG      — Red vs Green chromatic opponency (L - M), raw (unfiltered), signed
+      2:  CHROMA_BY      — Blue vs Yellow opponency (S - (L+M)), raw (unfiltered), signed
+      3:  SUBUNIT_ON     — Single-Gaussian highpass ON subunit (achromatic): ReLU(Y - blur(Y))
+      4:  SUBUNIT_OFF    — Single-Gaussian highpass OFF subunit (achromatic): ReLU(blur(Y) - Y)
       5:  TRANSIENT      — Magnocellular biphasic temporal contrast, signed
       6:  DS_RIGHT       — ON-OFF Direction-Selective GC, preferred: right (0°)
       7:  DS_LEFT        — ON-OFF Direction-Selective GC, preferred: left (180°)
@@ -103,12 +102,16 @@ class DRFBiomimeticFrontEnd(nn.Module):
         alpha:                   Sustained IIR low-pass coefficient (default: 0.8).
         beta:                    DSGC delay-inhibit attenuation factor (default: 0.9).
         gamma:                   OMS surround inhibition gain (default: 1.2).
-        sigma_0:                 Divisive norm baseline saturation constant (default: 0.1).
-        norm_pool_kernel_size:   Local pooling kernel for divisive norm (default: 5).
-        sigma_surround_ratio:    Surround/center sigma ratio for achromatic DoG (default: 3.0).
-        chroma_dog_scale:        Chromatic DoG sigma relative to achromatic (default: 0.6).
-                                 Parvocellular midget bipolars have smaller RFs than M-pathway.
+        sigma_surround_ratio:    Blur sigma ratio (relative to scale) for the achromatic
+                                 single-Gaussian highpass, and for the OMS/looming wide
+                                 surround geometry (default: 3.0).
         snap_mode:               Grid snap strategy: 'crop_pad', 'adaptive_pool', 'interpolate'.
+        letterbox:               If True (default), pads the shorter spatial axis to a square
+                                 (with the border strip's mean color, not a replicated edge) before
+                                 Stage 0, so non-square inputs are never center-cropped or
+                                 anisotropically squashed; the pipeline's uniform stride S then
+                                 applies evenly to both axes. Set False to restore the legacy
+                                 behaviour of scaling directly off (H, W) via snap_mode alone.
     """
 
     CHANNEL_NAMES: Tuple[str, ...] = (
@@ -132,22 +135,18 @@ class DRFBiomimeticFrontEnd(nn.Module):
         alpha: float = 0.8,
         beta: float = 0.9,
         gamma: float = 1.2,
-        sigma_0: float = 0.1,
-        norm_pool_kernel_size: int = 5,
         sigma_surround_ratio: float = 3.0,
-        chroma_dog_scale: float = 0.6,
         snap_mode: str = "crop_pad",
+        letterbox: bool = True,
     ):
         super().__init__()
         self.target_resolution = target_resolution
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.gamma = float(gamma)
-        self.sigma_0 = float(sigma_0)
-        self.norm_pool_kernel_size = norm_pool_kernel_size
         self.sigma_surround_ratio = float(sigma_surround_ratio)
-        self.chroma_dog_scale = float(chroma_dog_scale)
         self.snap_mode = snap_mode
+        self.letterbox = bool(letterbox)
 
         # ------------------------------------------------------------------
         # Color Opponency Matrix: [Y, RG, BY]^T = M @ [R, G, B]^T
@@ -163,7 +162,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         self.register_buffer("opponency_matrix", opponency_matrix)
 
         # Bipolar signed channel mask: Ch 1 (RG), Ch 2 (BY), Ch 5 (TRANSIENT) are signed.
-        # Used in Stage 4 to preserve polarity through decimation.
+        # Used in Stage 3 to preserve polarity through decimation.
         is_bipolar = torch.tensor(
             [False, True, True, False, False, True, False, False, False, False, False, False],
             dtype=torch.bool
@@ -212,7 +211,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         return (
             f"DRFBiomimeticFrontEnd("
             f"target={self.target_resolution}, alpha={self.alpha}, beta={self.beta}, "
-            f"gamma={self.gamma}, sigma_0={self.sigma_0}, snap_mode={self.snap_mode!r})\n"
+            f"gamma={self.gamma}, snap_mode={self.snap_mode!r})\n"
             f"  Channels: [{ch}]"
         )
 
@@ -248,25 +247,40 @@ class DRFBiomimeticFrontEnd(nn.Module):
 
         return s, sigma_c, sigma_s, k_dog, sigma_wide, k_wide
 
+    @staticmethod
+    def _letterbox_to_square(x: torch.Tensor) -> torch.Tensor:
+        """
+        Pads the shorter spatial axis so (H, W) -> (max(H, W), max(H, W)).
+
+        Run before Stage 0 so the pipeline's single isotropic stride S applies evenly
+        to both axes downstream: non-square inputs are never center-cropped (losing
+        peripheral content) nor anisotropically squashed (distorting shape/motion).
+        Bars are filled with the mean color of the adjoining border strip rather than
+        replicate-padded: replicating a textured edge row/column down the whole bar
+        would stripe that texture into streaks instead of a flat letterbox bar.
+        """
+        h, w = x.shape[-2:]
+        if h == w:
+            return x
+        side = max(h, w)
+        pad_h, pad_w = side - h, side - w
+        if pad_h > 0:
+            top, bottom = pad_h // 2, pad_h - pad_h // 2
+            border = min(8, h)
+            top_fill = x[..., :border, :].mean(dim=(-2, -1), keepdim=True).expand(-1, -1, top, w)
+            bottom_fill = x[..., -border:, :].mean(dim=(-2, -1), keepdim=True).expand(-1, -1, bottom, w)
+            x = torch.cat([top_fill, x, bottom_fill], dim=-2)
+        if pad_w > 0:
+            left, right = pad_w // 2, pad_w - pad_w // 2
+            border = min(8, w)
+            left_fill = x[..., :, :border].mean(dim=(-2, -1), keepdim=True).expand(-1, -1, x.shape[-2], left)
+            right_fill = x[..., :, -border:].mean(dim=(-2, -1), keepdim=True).expand(-1, -1, x.shape[-2], right)
+            x = torch.cat([left_fill, x, right_fill], dim=-1)
+        return x
+
     # ------------------------------------------------------------------
     # Kernel cache accessors
     # ------------------------------------------------------------------
-
-    def _get_dog_kernel(
-        self,
-        k_dog: int,
-        sigma_c: float,
-        sigma_s: float,
-        device: torch.device,
-        dtype: torch.dtype,
-        tag: str = ""
-    ) -> torch.Tensor:
-        """Retrieves or creates a cached DoG kernel. `tag` disambiguates chromatic vs achromatic."""
-        key = f"dog{tag}_{k_dog}_{sigma_c:.4f}_{sigma_s:.4f}_{device}_{dtype}"
-        if key not in self._kernel_cache:
-            k = create_dog_kernel_2d(k_dog, sigma_c, sigma_s, device=device, dtype=dtype)
-            self._kernel_cache[key] = (k, k_dog // 2)
-        return self._kernel_cache[key][0]
 
     def _get_wide_gaussian_kernel(
         self,
@@ -290,7 +304,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         dtype: torch.dtype
     ) -> Tuple[torch.Tensor, int]:
         """
-        Retrieves or creates the Nyquist-scaled BlurPool kernel for Stage 4 decimation.
+        Retrieves or creates the Nyquist-scaled BlurPool kernel for Stage 3 decimation.
         Uses the 5×5 Binomial filter for S ≤ 2 (Zhang 2019), and a Gaussian BlurPool
         scaled to sigma = 0.4 * S for larger strides to match the Nyquist criterion.
         """
@@ -347,38 +361,34 @@ class DRFBiomimeticFrontEnd(nn.Module):
         k_dog: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Stage 2A: Center-surround DoG filtering for achromatic and chromatic pathways.
+        Stage 2A: Single-Gaussian highpass for the achromatic pathway; chromatic
+        pathway passed through unfiltered.
 
         Achromatic (M-pathway bipolars):
-            DoG_Y = Gauss(sigma_c) - Gauss(sigma_s)
-            SUBUNIT_ON  = ReLU( DoG_Y * Y )
-            SUBUNIT_OFF = ReLU( -DoG_Y * Y )
+            blur(Y)     = Gauss(sigma_c) * Y     (a convex combination of Y, so
+                          bounded in Y's own range — no DoG surround subtraction)
+            SUBUNIT_ON  = ReLU( Y - blur(Y) )
+            SUBUNIT_OFF = ReLU( blur(Y) - Y )
+            Both bounded in [0, 1] when Y is bounded in [0, 1], since each term
+            of the difference is itself in [0, 1].
 
         Chromatic (P-pathway midget bipolars):
-            DoG_chroma applied to RG and BY with scaled (smaller) sigmas,
-            matching the narrower parvocellular RF bandwidth vs M-pathway.
+            RG/BY passed through unfiltered — no spatial filtering stage.
 
         Returns:
-            sub_on:      Achromatic ON subunit.
-            sub_off:     Achromatic OFF subunit.
-            rg_filtered: Spatially filtered Red-Green channel (signed, bipolar).
-            by_filtered: Spatially filtered Blue-Yellow channel (signed, bipolar).
+            sub_on:  Achromatic ON subunit, bounded in [0, 1].
+            sub_off: Achromatic OFF subunit, bounded in [0, 1].
+            rg:      Raw (unfiltered) Red-Green channel (signed, bipolar).
+            by:      Raw (unfiltered) Blue-Yellow channel (signed, bipolar).
         """
-        # Achromatic DoG
-        dog_kernel = self._get_dog_kernel(k_dog, sigma_c, sigma_s, y.device, y.dtype, tag="")
-        pad = k_dog // 2
-        dog_resp = F.conv2d(y, dog_kernel, padding=pad)
-        sub_on  = F.relu(dog_resp)
-        sub_off = F.relu(-dog_resp)
+        # Replicate-pad before convolving (conv2d's own padding= is zero-padding)
+        # so the frame border isn't read as a false dark edge.
+        blur_kernel, pad = self._get_wide_gaussian_kernel(k_dog, sigma_c, y.device, y.dtype)
+        blurred_y = F.conv2d(F.pad(y, (pad, pad, pad, pad), mode="replicate"), blur_kernel)
+        sub_on  = F.relu(y - blurred_y)
+        sub_off = F.relu(blurred_y - y)
 
-        # Chromatic DoG (scaled sigmas for parvocellular midget bipolar bandwidth)
-        sc_c = max(0.4, sigma_c * self.chroma_dog_scale)
-        sc_s = max(0.8, sigma_s * self.chroma_dog_scale)
-        chroma_kernel = self._get_dog_kernel(k_dog, sc_c, sc_s, y.device, y.dtype, tag="_chroma")
-        rg_filtered = F.conv2d(rg, chroma_kernel, padding=pad)
-        by_filtered = F.conv2d(by, chroma_kernel, padding=pad)
-
-        return sub_on, sub_off, rg_filtered, by_filtered
+        return sub_on, sub_off, rg, by
 
     # ------------------------------------------------------------------
     # Stage 2B: Motion, Transient & Surround Inhibition Circuits
@@ -486,7 +496,8 @@ class DRFBiomimeticFrontEnd(nn.Module):
             # sharpens motion-onset selectivity vs. sustained global camera pan.
             abs_t_curr = torch.abs(t_curr)
             wide_kernel, pad_wide = self._get_wide_gaussian_kernel(k_wide, sigma_wide, y_curr.device, y_curr.dtype)
-            surround_motion = F.conv2d(abs_t_prev, wide_kernel, padding=pad_wide)
+            abs_t_prev_padded = F.pad(abs_t_prev, (pad_wide,) * 4, mode="replicate")
+            surround_motion = F.conv2d(abs_t_prev_padded, wide_kernel)
             diff_motion = F.relu(abs_t_curr - self.gamma * surround_motion)
 
             # ---- Looming: Expansion-selective OFF_T (Münch et al. 2009) ----
@@ -495,13 +506,12 @@ class DRFBiomimeticFrontEnd(nn.Module):
             # Implementation: center-advantage competition of OFF_T against its
             # own wide surround — fires only when local OFF_T > surround OFF_T.
             off_transient = F.relu(-t_curr)
-            off_surround  = F.conv2d(off_transient, wide_kernel, padding=pad_wide)
+            off_transient_padded = F.pad(off_transient, (pad_wide,) * 4, mode="replicate")
+            off_surround  = F.conv2d(off_transient_padded, wide_kernel)
             # Center-advantage: local darkening must exceed what the wide surround sees.
             # Suppresses global uniform darkening; preserves local expanding edges.
             center_adv = F.relu(off_transient - off_surround)
             looming    = F.max_pool2d(center_adv, kernel_size=5, stride=1, padding=2) * center_adv
-
-            abs_t_curr = abs_t_curr  # already computed above
 
         # FIX (Issue #2): detach().clone() breaks reference to parent tensor storage,
         # preventing memory leaks during long (B, T, 3, H, W) video sequences.
@@ -514,56 +524,29 @@ class DRFBiomimeticFrontEnd(nn.Module):
         return s_curr, t_curr, ds_right, ds_left, ds_up, ds_down, diff_motion, looming, new_state
 
     # ------------------------------------------------------------------
-    # Stage 3: Divisive Normalization (Inner Plexiform Layer)
+    # Stage 3: Anti-Aliased Spatial Decimation & Grid Snap
     # ------------------------------------------------------------------
 
-    def _normalize_group(self, x: torch.Tensor) -> torch.Tensor:
+    def _decimate_and_snap(self, channels: torch.Tensor, stride_s: int) -> torch.Tensor:
         """
-        Applies local divisive normalization within a single functional pathway group
-        (Heeger 1992; Carandini & Heeger 2012).
-
-        Formula: Norm_c(x,y) = X_c(x,y) / (sigma_0 + Pool_local(mean_c(|X|^2)))
-        """
-        k   = self.norm_pool_kernel_size
-        pad = k // 2
-        # Population energy within this group (mean across channels keeps scale stable)
-        pop_sq     = torch.mean(x ** 2, dim=1, keepdim=True)
-        local_eng  = F.avg_pool2d(pop_sq, kernel_size=k, stride=1, padding=pad)
-        return x / (self.sigma_0 + local_eng)
-
-    def _divisive_normalization(self, channels: torch.Tensor) -> torch.Tensor:
-        """
-        Stage 3: Separate normalization pools for Parvocellular (Ch 0–4) and
-        Magnocellular (Ch 5–11) pathways, matching IPL laminar stratification.
-
-        FIX (Issue #4): previous implementation used a single cross-pathway
-        population pool, coupling spatial and motion channel gains.
-        """
-        spatial  = self._normalize_group(channels[:, :5,  :, :])   # P-pathway
-        temporal = self._normalize_group(channels[:, 5:,  :, :])   # M-pathway
-        return torch.cat([spatial, temporal], dim=1)
-
-    # ------------------------------------------------------------------
-    # Stage 4: Anti-Aliased Spatial Decimation & Grid Snap
-    # ------------------------------------------------------------------
-
-    def _decimate_and_snap(self, normalized_features: torch.Tensor, stride_s: int) -> torch.Tensor:
-        """
-        Stage 4: Anti-aliased decimation (BlurPool, Zhang 2019) + adaptive grid snap.
+        Stage 3: Anti-aliased decimation (BlurPool, Zhang 2019) + adaptive grid snap.
 
         1. L2 Energy magnitude for unipolar channels; polarity preserved for bipolar channels.
         2. Nyquist-scaled depthwise BlurPool convolution with stride S.
         3. Center crop or symmetric replicate-pad to exact target_resolution.
         """
         # Energy detection: preserve sign for bipolar channels (RG, BY, TRANSIENT)
-        energy_mag = torch.sqrt(torch.clamp(normalized_features ** 2, min=1e-12))
-        is_bipolar = self.is_bipolar.to(device=normalized_features.device)
-        energy = torch.where(is_bipolar, normalized_features, energy_mag)
+        energy_mag = torch.sqrt(torch.clamp(channels ** 2, min=1e-12))
+        is_bipolar = self.is_bipolar.to(device=channels.device)
+        energy = torch.where(is_bipolar, channels, energy_mag)
 
-        # Nyquist-scaled BlurPool decimation
+        # Nyquist-scaled BlurPool decimation. Replicate-pad (matching Zhang 2019's
+        # reflect-padded reference) instead of conv2d's zero-padding to avoid
+        # darkening the outermost decimated pixels toward the frame border.
         B, C, H, W = energy.shape
         blur_weight, pad = self._get_anti_aliasing_blur_kernel(stride_s, C, energy.device, energy.dtype)
-        decimated = F.conv2d(energy, blur_weight, stride=stride_s, padding=pad, groups=C)
+        energy_padded = F.pad(energy, (pad, pad, pad, pad), mode="replicate")
+        decimated = F.conv2d(energy_padded, blur_weight, stride=stride_s, groups=C)
 
         # Grid snap to target resolution
         target_h, target_w = self.target_resolution
@@ -615,7 +598,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         state: Optional[DRFState] = None
     ) -> Tuple[torch.Tensor, DRFState]:
         """
-        Processes one RGB frame through all 5 stages.
+        Processes one RGB frame through all 4 stages.
 
         FIX (Issue #8): decorated with @torch.no_grad() to match forward().
         Previously, calling this directly would silently build an autograd
@@ -632,6 +615,10 @@ class DRFBiomimeticFrontEnd(nn.Module):
         B, C, H, W = x.shape
         if C != 3:
             raise ValueError(f"Expected 3-channel RGB input, got {C} channels.")
+
+        if self.letterbox:
+            x = self._letterbox_to_square(x)
+            H, W = x.shape[-2:]
 
         # State selection: use explicit state if provided, else internal buffer.
         active_state = state if state is not None else self._state
@@ -661,7 +648,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         y, rg, by = self._photoreceptor_transduction(x)
 
         # Stage 2A: Spatial Form & Chromatic Pathway
-        sub_on, sub_off, rg_filtered, by_filtered = self._spatial_decomposition(
+        sub_on, sub_off, rg_raw, by_raw = self._spatial_decomposition(
             y, rg, by, sigma_c, sigma_s, k_dog
         )
 
@@ -681,8 +668,8 @@ class DRFBiomimeticFrontEnd(nn.Module):
         # Concatenate 12 parallel channels
         channels = torch.cat([
             sustained_lum,   # Ch  0: SUSTAINED_LUM
-            rg_filtered,     # Ch  1: CHROMA_RG      (signed, DoG-filtered)
-            by_filtered,     # Ch  2: CHROMA_BY      (signed, DoG-filtered)
+            rg_raw,          # Ch  1: CHROMA_RG      (signed, raw/unfiltered)
+            by_raw,          # Ch  2: CHROMA_BY      (signed, raw/unfiltered)
             sub_on,          # Ch  3: SUBUNIT_ON
             sub_off,         # Ch  4: SUBUNIT_OFF
             transient,       # Ch  5: TRANSIENT       (signed, biphasic)
@@ -694,11 +681,8 @@ class DRFBiomimeticFrontEnd(nn.Module):
             looming,         # Ch 11: LOOMING
         ], dim=1)
 
-        # Stage 3: Separate P/M Divisive Normalization
-        normalized = self._divisive_normalization(channels)
-
-        # Stage 4: Anti-Aliased Decimation & Grid Snap
-        output = self._decimate_and_snap(normalized, stride_s)
+        # Stage 3: Anti-Aliased Decimation & Grid Snap
+        output = self._decimate_and_snap(channels, stride_s)
 
         return output, new_state
 
