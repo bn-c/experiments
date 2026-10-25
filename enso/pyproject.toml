@@ -1,0 +1,78 @@
+[project]
+name = "ebm-mvp"
+version = "0.1.0"
+description = "Sudoku EBM (Enso) trained on Hugging Face sapientinc/sudoku-extreme"
+readme = "README.md"
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    "datasets>=3.0.0",
+    "huggingface-hub>=0.26.0",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "scikit-learn>=1.5.0",
+    "torch>=2.4.0",
+    "wandb>=0.24.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest >= 9.0.1",
+    "pytest-mock >= 3.15.1",
+    "pytest-asyncio >= 1.3.0",
+    "pytest-cov >= 7.0.0",
+    "ruff >= 0.14.6",
+]
+unit-test = [
+    "pytest >= 9.0.1",
+    "pytest-mock >= 3.15.1",
+    "pytest-asyncio >= 1.3.0",
+    "pytest-cov >= 7.0.0",
+]
+code-quality = [
+    "ruff >= 0.14.6",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ebm"
+
+[tool.ruff]
+fix = true
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["D", "RUF", "PT", "TID", "I", "PL"]
+ignore = ["D203", "D212"]
+per-file-ignores = { "tests/**/*.py" = ["D", "PLR2004"], "*_test.py" = ["D", "PLR2004"] }
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pytest]
+addopts = [
+    "--cov=src",
+    "--cov-report",
+    "xml",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+    "--maxfail=3",
+    "--durations=5",
+]
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+exclude_lines = ["if __name__"]
+omit = [
+    "src/ebm/main.py",
+    "src/ebm/training/trainer.py",
+    "src/ebm/training/metrics.py",
+]
