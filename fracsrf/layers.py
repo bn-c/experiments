@@ -22,6 +22,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .basis import hermite_gaussian_basis, interpolate_order
+
 
 class FracSRFConv2d(nn.Module):
     """Drop-in replacement for a k x k nn.Conv2d using FracSRF structured filters."""
@@ -73,33 +75,17 @@ class FracSRFConv2d(nn.Module):
             self.nu_x.clamp_(0.0, self.MAX_ORDER)
             self.nu_y.clamp_(0.0, self.MAX_ORDER)
 
+    @staticmethod
     def _hermite_gaussian_basis(
-        self, coords: torch.Tensor, sigma: torch.Tensor, max_order: int
+        coords: torch.Tensor, sigma: torch.Tensor, max_order: int
     ) -> torch.Tensor:
-        """Stacked G_0..G_max_order (Eq. 3), shape (max_order + 1, K)."""
-        xi = coords / (sigma * math.sqrt(2.0))
-        gauss = torch.exp(-coords ** 2 / (2.0 * sigma ** 2)) / (sigma * math.sqrt(2.0 * math.pi))
-
-        h = [torch.ones_like(xi), 2.0 * xi]
-        for i in range(2, max_order + 1):
-            h.append(2.0 * xi * h[-1] - 2.0 * (i - 1) * h[-2])
-
-        scale = -1.0 / (sigma * math.sqrt(2.0))
-        basis, factor = [], scale.new_ones(())
-        for i in range(max_order + 1):
-            basis.append(factor * h[i] * gauss)
-            factor = factor * scale
-        return torch.stack(basis, dim=0)
+        """Stacked G_0..G_max_order (Eq. 3), shape (max_order + 1, K). See `fracsrf.basis`."""
+        return hermite_gaussian_basis(coords, sigma, max_order)
 
     @staticmethod
     def _interpolate_order(basis: torch.Tensor, nu: torch.Tensor) -> torch.Tensor:
         """Linear interpolation between the two nearest integer-order bases (Eq. 8)."""
-        max_order = basis.shape[0] - 1
-        nu = nu.clamp(0.0, max_order - 1e-4)
-        lo_idx = nu.floor().long()
-        hi_idx = (lo_idx + 1).clamp(max=max_order)
-        frac = (nu - lo_idx.to(nu.dtype)).unsqueeze(-1)
-        return (1.0 - frac) * basis[lo_idx] + frac * basis[hi_idx]
+        return interpolate_order(basis, nu)
 
     def _build_kernel(self) -> Tuple[torch.Tensor, int]:
         sigma = self.sigma
