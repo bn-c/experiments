@@ -13,7 +13,7 @@ from ebm.dataset.torch_dataset import SudokuTorchDataset
 from ebm.evaluation.metrics import evaluate
 from ebm.evaluation.solver import solve_dataset
 from ebm.model.jepa import InferenceConfig, SudokuJEPA
-from ebm.training.checkpoint import CheckpointManager
+from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager
 from ebm.training.trainer import Trainer, TrainerConfig
 from ebm.utils.config import ArchitectureConfig, Config, TrainingConfig, tiny_architecture
 from ebm.utils.device import auto_scale_config
@@ -100,12 +100,17 @@ def train(args: argparse.Namespace) -> None:
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{param_count:,}')
 
+    resume_from: Path | None = None
+    if args.resume:
+        resume_from = Path(args.checkpoint) if args.checkpoint else train_cfg.checkpoint_dir / LAST_CHECKPOINT_NAME
+
     trainer = Trainer(
         model,
         train_loader,
         val_loader,
         TrainerConfig(app=app_cfg, arch=arch_cfg, train=train_cfg),
         test_loader=test_loader,
+        resume_from=resume_from,
     )
     trainer.train()
 
@@ -182,6 +187,17 @@ def main() -> None:
         '--tiny',
         action='store_true',
         help='Use a small architecture suitable for CPU / smoke runs',
+    )
+    train_parser.add_argument(
+        '--continue',
+        dest='resume',
+        action='store_true',
+        help=f'Resume from checkpoints/{LAST_CHECKPOINT_NAME} if it exists',
+    )
+    train_parser.add_argument(
+        '--checkpoint',
+        type=str,
+        help='Checkpoint file to resume from (with --continue; default: checkpoint.last.pt in checkpoint dir)',
     )
 
     eval_parser = subparsers.add_parser('eval', help='Evaluate a trained model')

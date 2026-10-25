@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -9,7 +10,7 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from ebm.model.jepa import SudokuJEPA
-from ebm.training.checkpoint import CheckpointManager, _CheckpointData
+from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager, _CheckpointData
 from ebm.training.losses import compute_loss
 from ebm.training.metrics import (
     compute_cell_accuracy,
@@ -51,6 +52,7 @@ class Trainer:
         val_loader: DataLoader,
         cfg: TrainerConfig,
         test_loader: DataLoader | None = None,
+        resume_from: Path | None = None,
     ) -> None:
         """
         Initialize the trainer.
@@ -61,6 +63,7 @@ class Trainer:
             val_loader: Validation data loader.
             cfg: Grouped configuration (app, arch, train).
             test_loader: Optional held-out test loader (evaluated once after training).
+            resume_from: Path to ``checkpoint.last.pt`` (or other full training checkpoint).
 
         """
         self.model = model
@@ -82,7 +85,10 @@ class Trainer:
         self.scheduler = create_lr_scheduler(self.optimizer, cfg.train, self.total_steps)
         self.checkpoint_mgr = CheckpointManager(cfg.train.checkpoint_dir, cfg.train.keep_top_k)
 
+        self.start_epoch = 0
         self.global_step = 0
+        if resume_from is not None:
+            self._load_resume(resume_from)
 
         init_wandb(
             cfg.app,
@@ -90,25 +96,55 @@ class Trainer:
             extra_config={**cfg.arch.model_dump(), **cfg.train.model_dump()},
         )
 
+    def _load_resume(self, path: Path) -> None:
+        if not path.exists():
+            logger.warning('Resume checkpoint not found at %s; starting from scratch', path)
+            return
+        meta = CheckpointManager.load(path, self.model, self.optimizer, self.scheduler)
+        self.start_epoch = int(meta['epoch']) + 1
+        self.global_step = int(meta.get('step', 0))
+        self.checkpoint_mgr.reindex_from_disk()
+        logger.info(
+            'Resumed from %s at epoch %d (global_step=%d, last cell_acc=%.4f)',
+            path.name,
+            self.start_epoch,
+            self.global_step,
+            float(meta.get('cell_accuracy', 0.0)),
+        )
+        if self.start_epoch >= self.train_cfg.epochs:
+            logger.warning(
+                'Checkpoint epoch %d >= configured epochs %d; nothing to train',
+                self.start_epoch,
+                self.train_cfg.epochs,
+            )
+
     def train(self) -> None:
         """Run the full training loop for all epochs."""
+        if self.start_epoch >= self.train_cfg.epochs:
+            return
+
         with logging_redirect_tqdm():
-            epoch_bar = tqdm(range(self.train_cfg.epochs), desc='epochs')
+            epoch_bar = tqdm(
+                range(self.start_epoch, self.train_cfg.epochs),
+                desc='epochs',
+                initial=self.start_epoch,
+                total=self.train_cfg.epochs,
+            )
             for epoch in epoch_bar:
                 train_loss = self._train_epoch(epoch)
                 val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
 
                 log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
-                self.checkpoint_mgr.save(
-                    _CheckpointData(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        epoch=epoch,
-                        step=self.global_step,
-                        val_energy=val_energy,
-                        cell_accuracy=cell_acc,
-                    )
+                ckpt_data = _CheckpointData(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    epoch=epoch,
+                    step=self.global_step,
+                    val_energy=val_energy,
+                    cell_accuracy=cell_acc,
                 )
+                self.checkpoint_mgr.save(ckpt_data)
+                self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
 
                 summary = (
                     f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '

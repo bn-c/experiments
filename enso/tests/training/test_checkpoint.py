@@ -1,6 +1,7 @@
 import torch
+from torch.optim.lr_scheduler import LinearLR
 
-from ebm.training.checkpoint import CheckpointManager, _CheckpointData
+from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager, _CheckpointData
 
 
 def _make_data(epoch: int = 0, val_energy: float = 1.0, cell_accuracy: float = 0.1) -> _CheckpointData:
@@ -54,6 +55,24 @@ def test_best_path_returns_highest_accuracy(tmp_path):
     best = mgr.best_path
     assert best is not None
     assert 'acc0.8000' in best.name
+
+
+def test_save_last_and_load_scheduler(tmp_path):
+    mgr = CheckpointManager(tmp_path, keep_top_k=3)
+    data = _make_data(epoch=2, cell_accuracy=0.42)
+    scheduler = LinearLR(data.optimizer, start_factor=1.0, total_iters=10)
+    for _ in range(3):
+        scheduler.step()
+
+    last_path = mgr.save_last(data, scheduler)
+    assert last_path.name == LAST_CHECKPOINT_NAME
+
+    new_model = torch.nn.Linear(4, 4)
+    new_optimizer = torch.optim.SGD(new_model.parameters(), lr=0.01)
+    new_scheduler = LinearLR(new_optimizer, start_factor=1.0, total_iters=10)
+    meta = CheckpointManager.load(last_path, new_model, new_optimizer, new_scheduler)
+    assert meta['epoch'] == 2
+    assert new_scheduler.state_dict() == scheduler.state_dict()
 
 
 def test_load_restores_model(tmp_path):
