@@ -1,12 +1,25 @@
 import pandas as pd
 
-from ebm.dataset.splits import split_dataset
+from ebm.dataset.splits import resolve_holdout_sizes, split_dataset
 
 
 def _make_df(n: int) -> pd.DataFrame:
     puzzle = '0' * 81
     solution = '1' * 81
     return pd.DataFrame({'puzzle': [puzzle] * n, 'solution': [solution] * n})
+
+
+def test_resolve_holdout_scales_down_for_small_n():
+    val, test = resolve_holdout_sizes(2048, 500_000, 500_000)
+    assert val == 102
+    assert test == 102
+    assert val + test < 2048
+
+
+def test_resolve_holdout_keeps_large_defaults():
+    val, test = resolve_holdout_sizes(10_000_000, 500_000, 500_000)
+    assert val == 500_000
+    assert test == 500_000
 
 
 def test_split_sizes():

@@ -57,6 +57,7 @@ class TrainingConfig(BaseModel):
     keep_top_k: int = Field(default=3, description='Number of best checkpoints to keep.')
     val_size: int = Field(default=500_000, description='Validation set size.')
     test_size: int = Field(default=500_000, description='Test set size.')
+    split_seed: int = Field(default=42, description='Random seed for train/val/test split.')
     langevin_steps: int = Field(default=50, description='Langevin dynamics steps at inference.')
     langevin_lr: float = Field(default=0.01, description='Langevin dynamics step size.')
     langevin_noise_scale: float = Field(default=0.005, description='Langevin dynamics noise scale.')

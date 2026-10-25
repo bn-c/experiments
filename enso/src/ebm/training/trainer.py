@@ -50,6 +50,7 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         cfg: TrainerConfig,
+        test_loader: DataLoader | None = None,
     ) -> None:
         """
         Initialize the trainer.
@@ -59,11 +60,13 @@ class Trainer:
             train_loader: Training data loader.
             val_loader: Validation data loader.
             cfg: Grouped configuration (app, arch, train).
+            test_loader: Optional held-out test loader (evaluated once after training).
 
         """
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.test_loader = test_loader
         self.train_cfg = cfg.train
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -121,6 +124,16 @@ class Trainer:
                     puzzle_acc,
                 )
 
+            if self.test_loader is not None:
+                test_energy, cell_acc, puzzle_acc, z_var = self._evaluate_loader(self.test_loader, desc='held-out test')
+                logger.info(
+                    'Held-out test | energy=%.4f | cell_acc=%.4f | puzzle_acc=%.4f | z_var=%.4f',
+                    test_energy,
+                    cell_acc,
+                    puzzle_acc,
+                    z_var,
+                )
+
         best = self.checkpoint_mgr.best_path
         if best:
             upload_checkpoint_to_wandb(best)
@@ -167,10 +180,14 @@ class Trainer:
 
         return total_loss / max(n_batches, 1)
 
-    @torch.no_grad()
     def _validate(self, epoch: int) -> tuple[float, float, float, float]:
+        """Run validation for one epoch."""
+        return self._evaluate_loader(self.val_loader, desc=f'epoch {epoch} val')
+
+    @torch.no_grad()
+    def _evaluate_loader(self, loader: DataLoader, desc: str) -> tuple[float, float, float, float]:
         """
-        Run validation and compute metrics.
+        Run forward-pass metrics on a dataloader (validation or held-out test).
 
         Returns:
             Tuple of (mean_energy, cell_accuracy, puzzle_accuracy, z_variance).
@@ -183,7 +200,7 @@ class Trainer:
         all_z_var = 0.0
         n_batches = 0
 
-        for batch in tqdm(self.val_loader, desc=f'epoch {epoch} val', leave=False):
+        for batch in tqdm(loader, desc=desc, leave=False):
             puzzle = batch['puzzle'].to(self.device)
             solution = batch['solution'].to(self.device)
             mask = batch['mask'].to(self.device)
