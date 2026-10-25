@@ -15,7 +15,6 @@ DRFViT = DRFBiomimeticFrontEnd(target_resolution=(64, 64))  ->  (B, 12, 64, 64)
          -> per-channel patchify -> ViT encoder -> [CLS] -> linear head
 """
 
-from typing import Tuple
 import warnings
 
 import torch
@@ -179,7 +178,7 @@ class DRFViT(nn.Module):
     def __init__(
         self,
         num_classes: int = 100,
-        drf_resolution: Tuple[int, int] = (64, 64),
+        drf_resolution: tuple[int, int] = (64, 64),
         patch_size: int = 16,
         embed_dim: int = 192,
         depth: int = 6,

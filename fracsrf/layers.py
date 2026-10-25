@@ -16,7 +16,6 @@ parameters per kernel instead of k*k.
 """
 
 import math
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -46,7 +45,7 @@ class FracSRFConv2d(nn.Module):
         out_channels: int,
         stride: int = 1,
         sigma_init: float = 1.0,
-        order_init_range: Tuple[float, float] = (1.0, 3.0),
+        order_init_range: tuple[float, float] = (1.0, 3.0),
         learn_sigma: bool = True,
         bias: bool = True,
     ):
@@ -115,25 +114,13 @@ class FracSRFConv2d(nn.Module):
         self.clip_orders_()
         self.clip_sigma_()
 
-    @staticmethod
-    def _hermite_gaussian_basis(
-        coords: torch.Tensor, sigma: torch.Tensor, max_order: int
-    ) -> torch.Tensor:
-        """Stacked G_0..G_max_order (Eq. 3), shape (max_order + 1, K). See `fracsrf.basis`."""
-        return hermite_gaussian_basis(coords, sigma, max_order)
-
-    @staticmethod
-    def _interpolate_order(basis: torch.Tensor, nu: torch.Tensor) -> torch.Tensor:
-        """Linear interpolation between the two nearest integer-order bases (Eq. 8)."""
-        return interpolate_order(basis, nu)
-
-    def _build_kernel(self) -> Tuple[torch.Tensor, int]:
+    def _build_kernel(self) -> tuple[torch.Tensor, int]:
         sigma = self.sigma
         # The spatial extent and the Hermite order are integers, so they are read back
         # from the parameters. Both are taken in ONE host sync (a stacked .tolist())
         # rather than two separate .item() calls: this runs once per layer per forward
         # pass, i.e. 31 layers x 2 syncs serialising every step on the GPU previously.
-        # The order must be the max over BOTH axes: _interpolate_order clips nu to
+        # The order must be the max over BOTH axes: interpolate_order clips nu to
         # max_order - 1e-4, so deriving it from nu_x alone would silently truncate nu_y.
         sigma_v, order_x, order_y = torch.stack([
             sigma.detach().clamp_max(float(self.MAX_SIGMA)),
@@ -146,10 +133,10 @@ class FracSRFConv2d(nn.Module):
         max_order = max(1, min(self.MAX_ORDER, int(math.ceil(max(order_x, order_y))) + 1))
 
         coords = torch.arange(-radius, radius + 1, device=sigma.device, dtype=sigma.dtype)
-        basis = self._hermite_gaussian_basis(coords, sigma, max_order)  # (max_order+1, K)
+        basis = hermite_gaussian_basis(coords, sigma, max_order)  # (max_order+1, K)
 
-        gx = self._interpolate_order(basis, self.nu_x)  # (out, in, K)
-        gy = self._interpolate_order(basis, self.nu_y)  # (out, in, K)
+        gx = interpolate_order(basis, self.nu_x)  # (out, in, K)
+        gy = interpolate_order(basis, self.nu_y)  # (out, in, K)
 
         kernel = gy.unsqueeze(-1) * gx.unsqueeze(-2)  # (out, in, K, K)
         kernel = kernel * self.alpha.view(self.out_channels, self.in_channels, 1, 1)

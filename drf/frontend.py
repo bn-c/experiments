@@ -56,14 +56,14 @@ References:
 - Dapello et al., 2020 (VOneNet fixed V1 front-end for adversarial robustness)
 """
 
-from typing import Tuple, Dict, Optional, Union, NamedTuple
 import math
+from typing import NamedTuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .kernels import create_gaussian_kernel_2d, safe_spatial_shift
-
 
 # ---------------------------------------------------------------------------
 # Causal State Buffer
@@ -84,7 +84,7 @@ class DRFState(NamedTuple):
     """
     y_prev: torch.Tensor
     s_prev: torch.Tensor
-    abs_t_prev: Optional[torch.Tensor]
+    abs_t_prev: torch.Tensor | None
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
                                  directly off (H, W) via snap_mode alone.
     """
 
-    CHANNEL_NAMES: Tuple[str, ...] = (
+    CHANNEL_NAMES: tuple[str, ...] = (
         "SUSTAINED_LUM",
         "CHROMA_RG",
         "CHROMA_BY",
@@ -152,7 +152,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
 
     def __init__(
         self,
-        target_resolution: Tuple[int, int] = (128, 128),
+        target_resolution: tuple[int, int] = (128, 128),
         alpha: float = 0.8,
         beta: float = 0.9,
         gamma: float = 1.2,
@@ -219,18 +219,18 @@ class DRFBiomimeticFrontEnd(nn.Module):
         self.register_buffer("is_bipolar", is_bipolar)
 
         # Causal temporal state buffer
-        self._state: Optional[DRFState] = None
+        self._state: DRFState | None = None
 
         # Letterbox fill colour, computed once per clip from the first frame's
         # border strips and reused for every later frame. Recomputing it per frame
         # (from each frame's own border) makes the synthetic bars change brightness
         # every frame, which injects transients/DSGC/looming responses into a region
         # that contains no image at all.
-        self._pad_fill: Optional[torch.Tensor] = None
+        self._pad_fill: torch.Tensor | None = None
 
         # Device-aware filter kernel cache.
         # IMPORTANT: cleared on .to() / .cuda() via _apply() override (Issue #3 fix).
-        self._kernel_cache: Dict[str, Tuple[torch.Tensor, int]] = {}
+        self._kernel_cache: dict[str, tuple[torch.Tensor, int]] = {}
 
     # ------------------------------------------------------------------
     # Device migration hook — clears cache so kernels are rebuilt on
@@ -255,10 +255,6 @@ class DRFBiomimeticFrontEnd(nn.Module):
         self._state = None
         self._pad_fill = None
 
-    def reset_state(self) -> None:
-        """Alias for reset()."""
-        self.reset()
-
     def clear_cache(self) -> None:
         """Clears precomputed filter kernel cache (useful after manual device changes)."""
         self._kernel_cache.clear()
@@ -282,7 +278,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
     # Stage 0: Dynamic Receptive Field Geometry Adapter
     # ------------------------------------------------------------------
 
-    def compute_geometry(self, h: int, w: int) -> Tuple[int, float, float, int, float, int]:
+    def compute_geometry(self, h: int, w: int) -> tuple[int, float, float, int, float, int]:
         """
         Computes the dynamic scale factor S and all filter parameters for the given input resolution.
 
@@ -341,7 +337,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         return torch.cat(strips, dim=-1).mean(dim=-1).view(x.shape[0], x.shape[1], 1, 1)
 
     @staticmethod
-    def _letterbox_to_square(x: torch.Tensor, fill: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _letterbox_to_square(x: torch.Tensor, fill: torch.Tensor | None = None) -> torch.Tensor:
         """
         Pads the shorter spatial axis so (H, W) -> (max(H, W), max(H, W)).
 
@@ -398,7 +394,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         sigma_wide: float,
         device: torch.device,
         dtype: torch.dtype
-    ) -> Tuple[torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, int]:
         """Retrieves or creates cached wide Gaussian kernel (OMS surround)."""
         key = f"gauss_{k_wide}_{sigma_wide:.4f}_{device}_{dtype}"
         if key not in self._kernel_cache:
@@ -412,7 +408,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         channels: int,
         device: torch.device,
         dtype: torch.dtype
-    ) -> Tuple[torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, int]:
         """
         Retrieves or creates the Nyquist-scaled BlurPool kernel for Stage 3 decimation.
 
@@ -445,7 +441,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
 
     def _photoreceptor_transduction(
         self, x_rgb: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Stage 1: Log dynamic range compression + BT.709 cone-opponent decomposition.
 
@@ -474,7 +470,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
         by: torch.Tensor,
         sigma_c: float,
         k_center: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Stage 2A: Single-Gaussian highpass for the achromatic pathway; chromatic
         pathway passed through unfiltered.
@@ -510,7 +506,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _reconcile_state(state: DRFState, y_curr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reconcile_state(state: DRFState, y_curr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns a cached state buffer with the current frame's batch and spatial shape.
 
@@ -550,10 +546,10 @@ class DRFBiomimeticFrontEnd(nn.Module):
     def _motion_decomposition(
         self,
         y_curr: torch.Tensor,
-        state: Optional[DRFState],
+        state: DRFState | None,
         sigma_wide: float,
         k_wide: int
-    ) -> Tuple[
+    ) -> tuple[
         torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor,
@@ -661,7 +657,7 @@ class DRFBiomimeticFrontEnd(nn.Module):
     @staticmethod
     def _directional_correlations(
         y_curr: torch.Tensor, delta_t: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Signed spatiotemporal correlations that carry the direction signal.
 
@@ -776,8 +772,8 @@ class DRFBiomimeticFrontEnd(nn.Module):
     def forward_single_frame(
         self,
         x: torch.Tensor,
-        state: Optional[DRFState] = None
-    ) -> Tuple[torch.Tensor, DRFState]:
+        state: DRFState | None = None
+    ) -> tuple[torch.Tensor, DRFState]:
         """
         Processes one RGB frame through all 4 stages.
 
@@ -861,9 +857,9 @@ class DRFBiomimeticFrontEnd(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        state: Optional[DRFState] = None,
+        state: DRFState | None = None,
         return_state: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, DRFState]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, DRFState]:
         """
         Unified forward pass for single frames (B, 3, H, W) and video sequences (B, T, 3, H, W).
 
