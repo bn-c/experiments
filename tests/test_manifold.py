@@ -8,15 +8,9 @@ the cortical manifold's isotropy condition, and FOVI's one-hot mapping conventio
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
 import torch
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from fracsrf import (
     StructuredKNNConv,
@@ -133,7 +127,7 @@ class TestSensor(unittest.TestCase):
         visual = torch.tensor([[1.0, 0.0]])  # 8 degrees, on the +x meridian
         cortical = cortical_coords(visual, cmf_a, fov, scale)
         self.assertAlmostEqual(float(cortical[0, 0]), scale * 8.0 / (cmf_a + 8.0), places=5)
-        self.assertAlmostEqual(float(cortical[0, 2]), float(cortical[0, 2]))  # z is finite
+        self.assertTrue(math.isfinite(float(cortical[0, 2])))
 
 
 class TestNeighbourhoods(unittest.TestCase):
