@@ -26,6 +26,21 @@ def to_tensor(rgb_np: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(rgb_np).permute(2, 0, 1).unsqueeze(0).float() / 255.0
 
 
+def shift_horizontally(rgb_np: np.ndarray, dx: int) -> np.ndarray:
+    """
+    Shifts image content right by `dx` px with edge replication.
+
+    `np.roll` would wrap the lost columns around to the opposite side, creating a
+    hard seam that the front-end then reports as a genuine motion edge — the exact
+    circular-wrap artifact `drf.kernels.safe_spatial_shift` exists to avoid.
+    """
+    dx = int(dx)
+    if dx <= 0:
+        return rgb_np
+    edge = np.repeat(rgb_np[:, :1, :], dx, axis=1)
+    return np.concatenate([edge, rgb_np[:, :-dx, :]], axis=1)
+
+
 def process_image(image_path: Path, output_dir: Path) -> None:
     """Renders the static frame (t=0) and a simulated 6 px saccade (t=1), plus 12 per-channel PNGs."""
     rgb_np = np.array(Image.open(image_path).convert("RGB"))
@@ -42,7 +57,7 @@ def process_image(image_path: Path, output_dir: Path) -> None:
     for path in save_channel_images(out_static, output_dir, f"{image_path.stem}_static"):
         print(f"  -> {path}")
 
-    rgb_shifted = np.roll(rgb_np, shift=6, axis=1)
+    rgb_shifted = shift_horizontally(rgb_np, 6)
     out_saccade = frontend(to_tensor(rgb_shifted))
     saccade_path = output_dir / f"{image_path.stem}_saccade.png"
     create_12_channel_grid(
@@ -55,7 +70,13 @@ def process_image(image_path: Path, output_dir: Path) -> None:
 
 def process_video(video_path: Path, output_dir: Path, max_frames: int) -> None:
     """Streams a video frame-by-frame and renders a combined GIF plus 12 per-channel GIFs."""
-    import imageio.v3 as iio
+    try:
+        import imageio.v3 as iio
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(
+            "Video rendering needs the optional `imageio` (and `imageio-ffmpeg`) package.\n"
+            "Install it with:  uv sync --extra video     (or: pip install imageio imageio-ffmpeg)"
+        ) from exc
 
     frontend = DRFBiomimeticFrontEnd().eval()
     frontend.reset()

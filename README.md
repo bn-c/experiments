@@ -13,12 +13,15 @@ four direction-selective channels, object-motion sensitivity, looming).
 | [drf/frontend.py](drf/frontend.py) | `DRFBiomimeticFrontEnd`, `DRFState` — the 5-stage model and its causal state machine |
 | [drf/kernels.py](drf/kernels.py) | Analytic Gaussian kernels and replicate-padded spatial shift |
 | [drf/visualization.py](drf/visualization.py) | Channel colorization and the 4×4 dashboard renderer (needs `numpy`, `Pillow`) |
+| [drf/vit.py](drf/vit.py) | `DRFViT` — per-pathway patchify + small ViT on top of the frozen front-end |
+| [fracsrf/](fracsrf/) | FracSRF structured-filter ResNet-32 (Saldanha et al., BMVC 2021) |
 | [fracsrf/basis.py](fracsrf/basis.py) | Shared separable Gaussian-derivative basis, used by the Cartesian and manifold filters |
 | [fracsrf/manifold.py](fracsrf/manifold.py) | FOVI-style foveated sensor and `StructuredKNNConv`: dense, structured and analytic kernel mapping |
 | [scripts/visualize_drf.py](scripts/visualize_drf.py) | CLI that renders channel decompositions for an image or video |
+| [scripts/train_vit_imagenet100.py](scripts/train_vit_imagenet100.py) | DRFViT training on `clane9/imagenet-100` |
+| [scripts/train_fracsrf_resnet32_cifar10.py](scripts/train_fracsrf_resnet32_cifar10.py) | FracSRF-ResNet-32 training on CIFAR-10 |
 | [scripts/check_fovi_mapping.py](scripts/check_fovi_mapping.py) | CLI measuring the kernel-mapping error a structured reference kernel removes |
-| [tests/test_frontend.py](tests/test_frontend.py) | Unit tests: geometry, resolution invariance, dual regime, DSGC tuning, looming, OMS, device migration |
-| [tests/test_manifold.py](tests/test_manifold.py) | Unit tests: isotropic sampling, manifold isotropy, kernel mapping, structured/analytic parity |
+| [tests/](tests/) | Unit tests: geometry, resolution invariance, dual regime, DSGC tuning, looming, OMS, device migration, ViT, manifold mapping |
 
 ## Usage
 
@@ -56,21 +59,18 @@ or pads a sliver; the retained field of view is continuous in the input size.
 
 ```bash
 python -m unittest discover tests
-python scripts/visualize_drf.py --image sample.jpg --video clip.mp4
+
+# images need numpy + pillow only
+python scripts/visualize_drf.py --image samples/sample.jpg
+
+# video decoding needs the optional `video` extra (imageio + imageio-ffmpeg)
+uv sync --extra video
+python scripts/visualize_drf.py --video samples/sample.mp4 --max-frames 30
 ```
 
-## ViT training (ROCm)
-
-[drf/vit.py](drf/vit.py) feeds the DRF front-end's `(B, 12, 64, 64)` output into a small
-ViT (`DRFViT`) and [scripts/train_vit_imagenet100.py](scripts/train_vit_imagenet100.py)
-trains it on the Hugging Face `clane9/imagenet-100` subset. Dependencies (including an
-AMD ROCm nightly build of PyTorch, installed from `download.pytorch.org`'s wheel index
-rather than built from source) are managed with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync
-uv run python scripts/train_vit_imagenet100.py --epochs 30 --batch-size 128
-```
+`outputs/` and `samples/` are git-ignored, so a fresh clone has neither the demo media
+nor any checkpoints; point `--image`/`--video` at your own files (or drop them into
+`samples/`).
 
 ## Structured filters on a foveated manifold (prototype)
 

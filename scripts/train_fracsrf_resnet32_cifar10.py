@@ -102,6 +102,9 @@ def run_epoch(model, loader, device, epoch=None, epochs=None, optimizer=None, cl
         total_n += images.size(0)
         pbar.set_postfix(loss=total_loss / total_n, acc=total_correct / total_n)
 
+    if total_n == 0:
+        raise ValueError("run_epoch() received an empty loader; nothing to iterate over.")
+
     return total_loss / total_n, total_correct / total_n
 
 
@@ -120,6 +123,7 @@ def main():
     parser.add_argument("--order-init-low", type=float, default=1.0)
     parser.add_argument("--order-init-high", type=float, default=3.0)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0, help="seed for python/torch RNGs")
     parser.add_argument("--checkpoint", default="outputs/fracsrf_resnet32_cifar10.pt")
     parser.add_argument(
         "--continue", dest="resume", action="store_true",
@@ -128,6 +132,9 @@ def main():
     args = parser.parse_args()
     last_checkpoint = os.path.splitext(args.checkpoint)[0] + ".last.pt"
     os.makedirs(os.path.dirname(args.checkpoint) or ".", exist_ok=True)
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} ({torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'})")

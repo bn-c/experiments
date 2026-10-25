@@ -16,6 +16,8 @@ DRFViT = DRFBiomimeticFrontEnd(target_resolution=(64, 64))  ->  (B, 12, 64, 64)
 """
 
 from typing import Tuple
+import warnings
+
 import torch
 import torch.nn as nn
 
@@ -148,12 +150,17 @@ def _rescale_per_channel_01(x: torch.Tensor, channel_min: torch.Tensor, channel_
     dataset-wide statistics rather than each sample's own min/max.
 
     The 12 DRF pathways have wildly different native ranges (e.g. sustained
-    luminance ~2.7-3.6, signed chroma ~-0.3-0.3, all-zero motion channels on
-    static images) so without this a shared patch embedding would see each
-    channel on its own arbitrary scale. Unlike per-sample min-max, this does
-    NOT force every image to touch exactly 0 and 1 — relative contrast and
-    absolute brightness/motion magnitude across samples are preserved; only
+    luminance ~0.8, signed chroma ~+-0.8, all-zero motion channels on static
+    images), so without this each per-pathway patch kernel would start from a
+    different activation scale. Unlike per-sample min-max, this does NOT force
+    every image to touch exactly 0 and 1 — relative contrast and absolute
+    brightness/motion magnitude across samples are preserved; only
     out-of-calibration-range outliers get clamped.
+
+    Note: `PatchEmbed` uses a *grouped* conv (independent weights per pathway),
+    so this is a conditioning aid for optimisation, not a prerequisite for
+    keeping channels distinguishable — the per-channel embedding below is what
+    tells the 12 pathways apart.
     """
     scaled = (x - channel_min) / (channel_max - channel_min).clamp_min(eps)
     return scaled.clamp(0.0, 1.0)
@@ -181,9 +188,9 @@ class DRFViT(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        # The front-end is parameter-free (it is an analytic filter bank), so there is
+        # nothing to freeze here: `frontend.parameters()` is empty by construction.
         self.frontend = DRFBiomimeticFrontEnd(target_resolution=drf_resolution).eval()
-        for p in self.frontend.parameters():
-            p.requires_grad_(False)
 
         # Global per-channel calibration stats for _rescale_per_channel_01, set
         # by calibrate(). Buffers so they're saved/restored with state_dict()
@@ -210,9 +217,18 @@ class DRFViT(nn.Module):
         Runs `max_batches` batches of raw RGB images through the frozen DRF
         front-end to compute a fixed, dataset-wide per-channel min/max, used
         thereafter by forward() instead of per-sample min-max rescaling.
+
+        Call this once before training. `scripts/train_vit_imagenet100.py` does it
+        automatically before the first epoch (and skips it when resuming, because the
+        buffers are restored from the checkpoint).
+
+        Raises:
+            ValueError: if no batch could be read (e.g. an empty loader), which would
+                otherwise leave `channel_min` at +inf and produce NaNs.
         """
         running_min = torch.full((1, 12, 1, 1), float("inf"), device=device)
         running_max = torch.full((1, 12, 1, 1), float("-inf"), device=device)
+        n_batches = 0
         for i, (images, _labels) in enumerate(loader):
             if i >= max_batches:
                 break
@@ -222,12 +238,24 @@ class DRFViT(nn.Module):
             batch_max = features.amax(dim=(0, 2, 3), keepdim=True)
             running_min = torch.minimum(running_min, batch_min)
             running_max = torch.maximum(running_max, batch_max)
+            n_batches += 1
+
+        if n_batches == 0:
+            raise ValueError("calibrate() received no batches; refusing to leave min/max unset.")
 
         self.channel_min.copy_(running_min)
         self.channel_max.copy_(running_max)
         self.calibrated = True
 
     def forward(self, x_rgb: torch.Tensor) -> torch.Tensor:
+        if not self.calibrated:
+            warnings.warn(
+                "DRFViT.forward() called before calibrate(); per-channel rescaling falls "
+                "back to the (0, 1) identity range, so pathway scales are not normalised. "
+                "Load a calibrated checkpoint or call calibrate(train_loader, device) first.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.frontend.reset()  # each batch call is an independent set of static images
         with torch.no_grad():
             features = self.frontend(x_rgb)  # (B, 12, H, W)

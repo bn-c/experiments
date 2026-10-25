@@ -85,9 +85,11 @@ def run_epoch(model, loader, device, epoch=None, epochs=None, optimizer=None, sc
     pbar = tqdm(loader, desc=desc, leave=False)
 
     total_loss, total_correct, total_n = 0.0, 0, 0
+    grad_accum_steps = max(1, int(grad_accum_steps))
     if is_train:
         optimizer.zero_grad(set_to_none=True)
 
+    step = -1
     for step, (images, labels) in enumerate(pbar):
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
@@ -107,10 +109,22 @@ def run_epoch(model, loader, device, epoch=None, epochs=None, optimizer=None, sc
         total_n += images.size(0)
         pbar.set_postfix(loss=total_loss / total_n, acc=total_correct / total_n)
 
-    # Flush any remaining accumulated gradients from a batch count not divisible by grad_accum_steps.
-    if is_train and (step + 1) % grad_accum_steps != 0:
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+    if total_n == 0:
+        raise ValueError("run_epoch() received an empty loader; nothing to iterate over.")
+
+    # Flush a trailing partial accumulation group. Its gradients were divided by
+    # `grad_accum_steps` even though only `(step + 1) % grad_accum_steps` micro-batches
+    # contributed, so rescale before stepping — otherwise the last group's update is
+    # under-sized by that factor.
+    if is_train:
+        remainder = (step + 1) % grad_accum_steps
+        if remainder != 0:
+            scale = grad_accum_steps / remainder
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.mul_(scale)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
     return total_loss / total_n, total_correct / total_n
 
@@ -130,6 +144,12 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--grad-accum-steps", type=int, default=1, help="optimizer.step() every N batches")
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0, help="seed for the python and torch RNGs")
+    parser.add_argument(
+        "--calibrate-batches", type=int, default=20,
+        help="batches of the training loader used to fit the per-channel DRF feature range "
+             "(0 disables calibration; checkpoints restore it automatically)",
+    )
     parser.add_argument("--checkpoint", default="outputs/drf_vit_imagenet100.pt")
     parser.add_argument(
         "--continue", dest="resume", action="store_true",
@@ -137,6 +157,10 @@ def main():
     )
     args = parser.parse_args()
     last_checkpoint = os.path.splitext(args.checkpoint)[0] + ".last.pt"
+    os.makedirs(os.path.dirname(args.checkpoint) or ".", exist_ok=True)
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # ROCm exposes itself through the same "cuda" device namespace as CUDA builds.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -174,9 +198,21 @@ def main():
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
+        # channel_min/channel_max are buffers, so the calibration statistics are restored
+        # by load_state_dict; the `calibrated` flag is not, so carry it explicitly.
+        model.calibrated = bool(ckpt.get("calibrated", True))
         start_epoch = ckpt["epoch"] + 1
         best_acc = ckpt["best_acc"]
         print(f"Resumed from {last_checkpoint} at epoch {start_epoch} (best_acc={best_acc:.4f})")
+
+    # Fit the fixed per-channel DRF feature range before training: DRFViT.forward()
+    # rescales with it, and the (0, 1) default would leave every pathway on whatever
+    # native scale it happens to have.
+    if not model.calibrated and args.calibrate_batches > 0:
+        print(f"Calibrating DRF feature ranges over {args.calibrate_batches} batches...")
+        model.calibrate(train_loader, device, max_batches=args.calibrate_batches)
+        print("  channel_min:", [round(v, 3) for v in model.channel_min.flatten().tolist()])
+        print("  channel_max:", [round(v, 3) for v in model.channel_max.flatten().tolist()])
 
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="epochs", initial=start_epoch - 1, total=args.epochs)
     for epoch in epoch_bar:
@@ -198,7 +234,11 @@ def main():
 
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save({"model": model.state_dict(), "args": vars(args), "val_acc": val_acc}, args.checkpoint)
+            torch.save(
+                {"model": model.state_dict(), "args": vars(args), "val_acc": val_acc,
+                 "calibrated": model.calibrated},
+                args.checkpoint,
+            )
 
         torch.save({
             "model": model.state_dict(),
@@ -206,6 +246,7 @@ def main():
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_acc": best_acc,
+            "calibrated": model.calibrated,
             "args": vars(args),
         }, last_checkpoint)
 
