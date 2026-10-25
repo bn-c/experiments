@@ -88,6 +88,8 @@ class Trainer:
 
         self.start_epoch = 0
         self.global_step = 0
+        self._last_val_energy = 0.0
+        self._last_cell_acc = 0.0
         if resume_from is not None:
             self._load_resume(resume_from)
 
@@ -104,6 +106,8 @@ class Trainer:
         meta = CheckpointManager.load(path, self.model, self.optimizer, self.scheduler)
         self.start_epoch = int(meta['epoch']) + 1
         self.global_step = int(meta.get('step', 0))
+        self._last_val_energy = float(meta.get('val_energy', 0.0))
+        self._last_cell_acc = float(meta.get('cell_accuracy', 0.0))
         self.checkpoint_mgr.reindex_from_disk()
         logger.info(
             'Resumed from %s at epoch %d (global_step=%d, last cell_acc=%.4f)',
@@ -137,8 +141,10 @@ class Trainer:
                 train_loss = self._train_epoch(epoch)
                 val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
 
+                self._last_val_energy = val_energy
+                self._last_cell_acc = cell_acc
                 log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
-                self._persist_checkpoint_if_due(epoch, val_energy, cell_acc)
+                self._persist_full_checkpoint_if_due(epoch, val_energy, cell_acc)
 
                 summary = (
                     f'train_loss={train_loss:.4f} val_energy={val_energy:.4f} '
@@ -172,10 +178,8 @@ class Trainer:
     def _checkpoint_due(self) -> bool:
         return time.monotonic() - self._last_ckpt_time >= self.train_cfg.checkpoint_interval_sec
 
-    def _persist_checkpoint_if_due(self, epoch: int, val_energy: float, cell_acc: float) -> None:
-        if not self._checkpoint_due():
-            return
-        ckpt_data = _CheckpointData(
+    def _checkpoint_data(self, epoch: int, val_energy: float, cell_acc: float) -> _CheckpointData:
+        return _CheckpointData(
             model=self.model,
             optimizer=self.optimizer,
             epoch=epoch,
@@ -183,6 +187,12 @@ class Trainer:
             val_energy=val_energy,
             cell_accuracy=cell_acc,
         )
+
+    def _persist_full_checkpoint_if_due(self, epoch: int, val_energy: float, cell_acc: float) -> None:
+        """Top-K + ``checkpoint.last.pt`` after epoch validation when the interval has elapsed."""
+        if not self._checkpoint_due():
+            return
+        ckpt_data = self._checkpoint_data(epoch, val_energy, cell_acc)
         self.checkpoint_mgr.save(ckpt_data)
         self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
         self._last_ckpt_time = time.monotonic()
@@ -192,6 +202,15 @@ class Trainer:
             self.global_step,
             cell_acc,
         )
+
+    def _save_last_if_due(self, epoch: int) -> None:
+        """Resume checkpoint only (no validation); uses metrics from the last epoch val."""
+        if not self._checkpoint_due():
+            return
+        ckpt_data = self._checkpoint_data(epoch, self._last_val_energy, self._last_cell_acc)
+        self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
+        self._last_ckpt_time = time.monotonic()
+        logger.info('Resume checkpoint at epoch %d step %d', epoch, self.global_step)
 
     def _train_epoch(self, epoch: int) -> float:
         """
@@ -232,10 +251,7 @@ class Trainer:
             self.global_step += 1
             batch_bar.set_postfix(loss=f'{loss_val:.4f}', refresh=False)
 
-            if self._checkpoint_due():
-                val_energy, cell_acc, puzzle_acc, z_var = self._validate(epoch)
-                log_validation(val_energy, cell_acc, puzzle_acc, z_var, self.global_step)
-                self._persist_checkpoint_if_due(epoch, val_energy, cell_acc)
+            self._save_last_if_due(epoch)
 
         return total_loss / max(n_batches, 1)
 
