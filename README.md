@@ -22,7 +22,6 @@ four direction-selective channels, object-motion sensitivity, looming).
 | [scripts/train_fracsrf_resnet32_cifar10.py](scripts/train_fracsrf_resnet32_cifar10.py) | FracSRF-ResNet-32 training on CIFAR-10 |
 | [scripts/check_fovi_mapping.py](scripts/check_fovi_mapping.py) | CLI measuring the kernel-mapping error a structured reference kernel removes |
 | [tests/](tests/) | Unit tests: geometry, resolution invariance, dual regime, DSGC tuning, looming, OMS, device migration, ViT, manifold mapping |
-| [enso/](enso/) | Vendored Sudoku EBM (Enso), trained on HF `sapientinc/sudoku-extreme` |
 
 ## Usage
 
