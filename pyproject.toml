@@ -56,6 +56,10 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "scripts/visualize_drf.py" = ["E402"]
 "scripts/check_fovi_mapping.py" = ["E402"]
+"sfprm_miniarc/train.py" = ["E402"]
+"sfprm_miniarc/evaluate.py" = ["E402"]
+"sfprm_miniarc/test_smoke.py" = ["E402"]
+"sfprm_miniarc/data/download_miniarc.py" = ["E402"]
 
 [[tool.uv.index]]
 name = "pytorch-rocm-nightly"

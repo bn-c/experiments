@@ -1,96 +1,71 @@
-# SFPRM Mini-ARC baseline
+# SFPRM Mini-ARC (paper-faithful)
 
-Spherical Fixed-Point Reasoner Model (weight-tied nGPT on \(S^{d-1}\)) trained on
-Mini-ARC (149 × 5×5 ARC-style tasks; Kim et al., NeurIPS 2022 nCSI workshop).
+Spherical Fixed-Point Reasoner (weight-tied nGPT on \(S^{d-1}\)) on Mini-ARC,
+aligned with [arXiv:2610.25646](https://arxiv.org/abs/2610.25646) Appendix B /
+Table 3, scaled for a **1×16GB GPU** desk run.
 
-Architecture matches the execution guide (`d_model=512`, `d_ff=1536`, one
-weight-tied block) → **~2.70M params** (the guide’s “~6.83M” figure is
-inconsistent with those dims). Target (single ≥16GB GPU, ~1.5–3h): **~48–53%
-Pass@1** with adaptive chordal halting at eval.
+## Dims (16GB desk vs paper)
+
+| | Paper Mini-ARC | This desk default |
+| --- | --- | --- |
+| hidden / heads / MLP | 512 / 8 / ×4 | **384 / 8 / ×4** (`d_ff=1536`) |
+| L_layers | 2 | 2 |
+| SwiGLU, RoPE, causal conv k=4 | yes | yes |
+| puzzle-emb length | 1 | 1 |
+| vocab / packing | 12 / seq 25 | 12 / **packed demos+query ≤128** (desk) |
+| trainable params | 6.83M (listed) | **~4.79M** (counted; 512-wide SwiGLU×2L ≈8.48M) |
+
+Paper ratios kept (heads=8, MLP×4, L=2); width scaled so batch 512 + BPTT K=6 +
+carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have headroom.
+
+## Paper knobs matched
+
+- **Solver:** per-sample η, patience P=5, γ=0.9, η_min=0.001, guarded Slerp,
+  train `max_iter=8`, carry+detach across segments (no global learned η / restart-each-step)
+- **Halt / eval:** chordal `max_t(1−⟨z,ẑ⟩)`, τ=0.01, eval `max_iter=200`
+- **Reg:** weight drop 0.05, variational drop 0.2, EMA 0.999, Q-head loss 0.5,
+  λ init **0.1**
+- **Optim:** Muon lr **5e-3**, weight decay **0.1**, AdamW 1e-3, puzzle-emb lr/wd **1e-2 / 0**
+
+## Desk knobs kept (intentionally not paper)
+
+- Steps **12,000** (paper ~68,993)
+- Aug **149×64** via D₄×`n_color_perms=8` + current packing (paper 149×100, seq 25)
+
+## Remaining gaps vs paper
+
+- **Vote-over-augs** Pass@1 (paper B.1/B.4) not implemented — eval is unaugmented task Pass@1
+- Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation
+- Width 384 vs paper 512 (16GB); full-width flag available
+- γ_eval=0.9 (paper Mini-ARC train/eval both 0.9) — OK; Sudoku uses 0.99 at eval
 
 ## Layout
 
 ```text
 sfprm_miniarc/
-├── data/download_miniarc.py   # HF andrewcropper/ilp-datasets mini-arc/ → JSON
-├── data/dataset.py            # D₄ + color-perm augs, in-device cache
-├── models/spherical_ops.py    # slerp / project / geodesic damping
-├── models/sfprm_core.py       # weight-tied NormalizedTransformerBlock + SFPRM
-├── optim/muon.py              # Newton–Schulz Muon
-├── train.py                   # truncated BPTT, Muon+AdamW, W&B
-├── evaluate.py                # chordal halting Pass@1
+├── data/download_miniarc.py
+├── data/dataset.py
+├── models/spherical_ops.py   # guarded Slerp, chordal residual
+├── models/sfprm_core.py      # nGPT block + SFPRM
+├── models/solver.py          # patience η schedule
+├── models/ema.py
+├── optim/muon.py
+├── train.py
+├── evaluate.py
 └── run.sh
 ```
 
-## Setup
+## Setup / run
 
 ```bash
 cd sfprm_miniarc
-python -m venv .venv && source .venv/bin/activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
+./run.sh --smoke          # CPU-friendly
+./run.sh                  # full 12k (needs ≥16GB GPU)
 ```
 
-## Full train (12k steps)
+Eval:
 
 ```bash
-./run.sh
-# or:
-python data/download_miniarc.py
-python train.py --steps 12000 --bptt_k 6 --batch_size 512 --compile --out_dir ./checkpoints
-python evaluate.py --checkpoint ./checkpoints/model_best.pt --epsilon 1e-3 --max_loops 100
+python evaluate.py --checkpoint ./checkpoints/model_best.pt --tau 0.01 --max_loops 200
 ```
-
-Acceptance (guide): ≤3.5h on 4080/3090/V100, ≤6.5GB VRAM, ≥48% Pass@1, mean
-halt steps roughly 15–35.
-
-## Smoke test (CPU/CUDA, tiny)
-
-```bash
-./run.sh --smoke
-# or:
-python train.py --steps 3 --bptt_k 2 --batch_size 4 --max_tasks 4 --eval_every 3 --no-wandb
-```
-
-## Design notes / gap fills
-
-### Mini-ARC source
-
-Hugging Face **`andrewcropper/ilp-datasets`**, subset path **`mini-arc/`**
-(149 task dirs, each with `train/` + `test/` Prolog). `download_miniarc.py`
-pulls that tree via `huggingface_hub.snapshot_download`, converts to ARC
-`{train,test}` JSON (same Kim et al. tasks as KSB21ST/MINI-ARC), and caches
-under `data/mini_arc/*.json` (gitignored). There is no tabular
-`load_dataset` config on that repo; the script builds a `datasets.Dataset`
-from the converted rows before writing the local cache.
-
-### Sequence packing
-
-`vocab_size=11`: colors `0–9`, **`PAD_ID=10`**. Each sample is:
-
-`[demo₀_in ‖ demo₀_out ‖ … ‖ demoₖ_in ‖ demoₖ_out ‖ query_in ‖ PAD…]`
-
-with `k ≤ 2` so length ≤ 128. **`query_mask`** covers the 25 query-input
-positions; the head predicts the query **output** colors at those positions
-(in-place transform). Color `0` is treated as background and is not permuted;
-D₄ uses 4 rotations × optional left-right flip (8).
-
-### Optimizer split
-
-- **Muon** (`lr=0.02`, momentum `0.95`): 2D `Linear` weights inside `core_block` only.
-- **AdamW** (`lr=1e-3`, `wd=1e-2`): `token_emb`, `pos_emb`, `head`, `raw_lambda`, `raw_eta`.
-
-Embeddings/head are 2D but stay on AdamW (standard Muon practice). Muon uses
-Keller Jordan Newton–Schulz5 orthogonalization (`optim/muon.py`).
-
-### W&B
-
-Project default: `sfprm-miniarc` (`--wandb-project`).
-
-- Enabled automatically when `WANDB_API_KEY` is set.
-- `--wandb` forces on (offline mode if no key); `--no-wandb` disables.
-- Logs `train/loss`, `train/lr_*`, `train/lambda`, `train/eta`, and periodic
-  `eval/pass_at_1`, `eval/mean_halt_steps`. Best ckpt by eval Pass@1.
-
-Mirrors the optional W&B pattern used in `trm/` / `enso/` (init + metric keys +
-artifact upload), with CLI flags instead of pydantic config.

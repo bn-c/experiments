@@ -1,77 +1,389 @@
-"""Weight-tied spherical fixed-point reasoner (SFPRM)."""
+"""Weight-tied spherical fixed-point reasoner (SFPRM), paper-faithful nGPT block.
+
+Architecture follows arXiv:2610.25646 Appendix B / Table 3 (Mini-ARC column),
+with hidden/ff dims scaled for a 1×16GB GPU desk target (see README / PR).
+
+Paper Mini-ARC: 512 / 8 / MLP×4 / L_layers=2 / RoPE / causal conv k=4 /
+puzzle-emb len 1 / SwiGLU / eigen-LR retraction / post-step weight renorm.
+Desk default dims: d_model=384, n_heads=8, d_ff=1536 (×4), n_layers=2 → ~4.7M.
+"""
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from models.spherical_ops import geodesic_damping, project_to_sphere, slerp
+from models.spherical_ops import chordal_residual, guarded_slerp, project_to_sphere
+
+# Desk 16GB default (paper ratios: heads=8, MLP×4, L_layers=2).
+DEFAULT_D_MODEL = 384
+DEFAULT_N_HEADS = 8
+DEFAULT_D_FF = 1536  # 4 × d_model
+DEFAULT_N_LAYERS = 2
+DEFAULT_VOCAB = 12  # colors 0–9, PAD=10, SEP=11 (paper Mini-ARC vocab 12)
+PAD_ID = 10
+SEP_ID = 11
 
 
-class NormalizedTransformerBlock(nn.Module):
-    """Single weight-tied block with QK-normalized self-attention and MLP."""
+def logit(p: float) -> float:
+    p = min(max(p, 1e-6), 1.0 - 1e-6)
+    return math.log(p / (1.0 - p))
 
-    def __init__(self, d_model: int = 512, n_heads: int = 8, d_ff: int = 1536):
+
+class RotaryEmbedding(nn.Module):
+    """Standard RoPE on head_dim (even)."""
+
+    def __init__(self, head_dim: int, max_seq_len: int = 256, base: float = 10000.0):
+        super().__init__()
+        if head_dim % 2 != 0:
+            raise ValueError(f"RoPE head_dim must be even, got {head_dim}")
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.max_seq_len = max_seq_len
+        self._build_cache(max_seq_len)
+
+    def _build_cache(self, seq_len: int) -> None:
+        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)  # [S, head_dim/2]
+        emb = torch.cat([freqs, freqs], dim=-1)
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+        self.max_seq_len = seq_len
+
+    def forward(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if seq_len > self.max_seq_len:
+            self._build_cache(seq_len)
+        return self.cos_cached[:, :, :seq_len], self.sin_cached[:, :, :seq_len]
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # q,k: [B, H, S, Dh]
+    q = q * cos + _rotate_half(q) * sin
+    k = k * cos + _rotate_half(k) * sin
+    return q, k
+
+
+class CausalDepthwiseConv1d(nn.Module):
+    """Bias-free depthwise 1-D causal conv (paper: k=4)."""
+
+    def __init__(self, d_model: int, kernel_size: int = 4):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.conv = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=kernel_size,
+            groups=d_model,
+            bias=False,
+            padding=0,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, S, D] → conv over sequence
+        x_t = x.transpose(1, 2)  # [B, D, S]
+        x_t = F.pad(x_t, (self.kernel_size - 1, 0))
+        return self.conv(x_t).transpose(1, 2)
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.w_gate = nn.Linear(d_model, d_ff, bias=False)
+        self.w_up = nn.Linear(d_model, d_ff, bias=False)
+        self.w_down = nn.Linear(d_ff, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
+
+
+class NGPTLayer(nn.Module):
+    """One nGPT layer: QK-norm attention + SwiGLU MLP, each with eigen-LR retraction."""
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        rope: RotaryEmbedding,
+        conv_kernel: int = 4,
+        weight_dropout: float = 0.0,
+    ):
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError(f"d_model={d_model} must be divisible by n_heads={n_heads}")
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
+        self.rope = rope
+        self.weight_dropout = weight_dropout
 
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, d_model, bias=False)
         self.v_proj = nn.Linear(d_model, d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_ff, bias=False),
-            nn.GELU(),
-            nn.Linear(d_ff, d_model, bias=False),
+        self.conv = CausalDepthwiseConv1d(d_model, kernel_size=conv_kernel)
+        self.mlp = SwiGLU(d_model, d_ff)
+
+        # Eigen learning rates (per hidden dim), init 0.5 as paper
+        self.alpha_A = nn.Parameter(torch.full((d_model,), 0.5))
+        self.alpha_M = nn.Parameter(torch.full((d_model,), 0.5))
+        # Per-dimension QK scale, init 1
+        self.s_qk = nn.Parameter(torch.ones(self.head_dim))
+
+    def _drop_weight(self, w: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.weight_dropout <= 0:
+            return w
+        return F.dropout(w, p=self.weight_dropout, training=True)
+
+    def _linear(self, linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self._drop_weight(linear.weight), linear.bias)
+
+    def forward(self, z: torch.Tensor, variational_mask: torch.Tensor | None = None) -> torch.Tensor:
+        B, S, D = z.shape
+        if variational_mask is not None:
+            z = z * variational_mask
+
+        q = project_to_sphere(self._linear(self.q_proj, z))
+        k = project_to_sphere(self._linear(self.k_proj, z))
+        v = self._linear(self.v_proj, z)
+
+        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = self.rope(S)
+        cos = cos.to(dtype=q.dtype, device=q.device)
+        sin = sin.to(dtype=q.dtype, device=q.device)
+        q, k = apply_rope(q, k, cos, sin)
+
+        # QK scale (nGPT): s_qk per head dim
+        scale = self.s_qk.to(dtype=q.dtype)
+        attn = torch.softmax((q * scale) @ k.transpose(-2, -1) / (self.head_dim**0.5), dim=-1)
+        attn_out = (attn @ v).transpose(1, 2).contiguous().view(B, S, D)
+        attn_out = project_to_sphere(self._linear(self.out_proj, attn_out))
+
+        # Eigen-LR attention retraction
+        z = project_to_sphere(z + self.alpha_A * (attn_out - z))
+
+        # Causal conv + SwiGLU MLP branch (weight dropout on Linear mats)
+        h = project_to_sphere(z + self.conv(z))
+        mlp_out = project_to_sphere(
+            F.linear(
+                F.silu(F.linear(h, self._drop_weight(self.mlp.w_gate.weight)))
+                * F.linear(h, self._drop_weight(self.mlp.w_up.weight)),
+                self._drop_weight(self.mlp.w_down.weight),
+            )
+        )
+        z = project_to_sphere(z + self.alpha_M * (mlp_out - z))
+        return z
+
+
+class NormalizedTransformerBlock(nn.Module):
+    """Stack of ``n_layers`` nGPT layers (weight-tied across solver iterations)."""
+
+    def __init__(
+        self,
+        d_model: int = DEFAULT_D_MODEL,
+        n_heads: int = DEFAULT_N_HEADS,
+        d_ff: int = DEFAULT_D_FF,
+        n_layers: int = DEFAULT_N_LAYERS,
+        max_seq_len: int = 128,
+        conv_kernel: int = 4,
+        weight_dropout: float = 0.05,
+        variational_dropout: float = 0.2,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.variational_dropout = variational_dropout
+        self.rope = RotaryEmbedding(d_model // n_heads, max_seq_len=max_seq_len)
+        self.layers = nn.ModuleList(
+            [
+                NGPTLayer(
+                    d_model,
+                    n_heads,
+                    d_ff,
+                    self.rope,
+                    conv_kernel=conv_kernel,
+                    weight_dropout=weight_dropout,
+                )
+                for _ in range(n_layers)
+            ]
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        B, S, D = z.shape
-        q = project_to_sphere(self.q_proj(z)).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = project_to_sphere(self.k_proj(z)).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(z).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-
-        scale = self.head_dim**0.5
-        attn = torch.softmax((q @ k.transpose(-2, -1)) / scale, dim=-1)
-        attn_out = (attn @ v).transpose(1, 2).contiguous().view(B, S, D)
-        z_mid = project_to_sphere(z + self.out_proj(attn_out))
-        return project_to_sphere(z_mid + self.mlp(z_mid))
+        if self.training and self.variational_dropout > 0:
+            # Same Bernoulli mask across sequence positions (variational / locked dropout).
+            keep = 1.0 - self.variational_dropout
+            mask = (
+                torch.bernoulli(
+                    torch.full((z.shape[0], 1, z.shape[2]), keep, device=z.device, dtype=z.dtype)
+                )
+                / keep
+            )
+            z = z * mask
+        for layer in self.layers:
+            z = layer(z, variational_mask=None)
+        return z
 
 
 class SFPRM(nn.Module):
-    """~6.8M-parameter weight-tied nGPT reasoner on the unit sphere."""
+    """Spherical Fixed-Point Reasoner (nGPT backbone + geodesic injection)."""
 
-    def __init__(self, vocab_size: int = 11, d_model: int = 512, max_seq_len: int = 128):
+    def __init__(
+        self,
+        vocab_size: int = DEFAULT_VOCAB,
+        d_model: int = DEFAULT_D_MODEL,
+        n_heads: int = DEFAULT_N_HEADS,
+        d_ff: int = DEFAULT_D_FF,
+        n_layers: int = DEFAULT_N_LAYERS,
+        max_seq_len: int = 128,
+        n_puzzles: int = 149,
+        puzzle_emb_len: int = 1,
+        num_classes: int = 10,
+        weight_dropout: float = 0.05,
+        variational_dropout: float = 0.2,
+        lambda_init: float = 0.1,
+        s_z_init: float = 16.0,
+    ):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.max_seq_len = max_seq_len
+        self.puzzle_emb_len = puzzle_emb_len
+        self.n_puzzles = n_puzzles
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Embedding(max_seq_len, d_model)
-        self.core_block = NormalizedTransformerBlock(d_model=d_model, n_heads=8, d_ff=1536)
-        self.raw_lambda = nn.Parameter(torch.tensor(0.0))
-        self.raw_eta = nn.Parameter(torch.tensor(0.0))
-        self.head = nn.Linear(d_model, 10, bias=False)
+        # Per-puzzle embedding (length 1 for Mini-ARC); prepended to the sequence.
+        self.puzzle_emb = nn.Embedding(max(n_puzzles, 1), d_model * puzzle_emb_len)
 
-    def get_input_embedding(self, x: torch.Tensor) -> torch.Tensor:
+        self.core_block = NormalizedTransformerBlock(
+            d_model=d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            n_layers=n_layers,
+            max_seq_len=max_seq_len + puzzle_emb_len,
+            weight_dropout=weight_dropout,
+            variational_dropout=variational_dropout,
+        )
+
+        # λ = sigmoid(raw); init so sigmoid(raw) = lambda_init (paper: 0.1, not σ(0)=0.5)
+        self.raw_lambda = nn.Parameter(torch.tensor(logit(lambda_init)))
+        self.s_z = nn.Parameter(torch.tensor(s_z_init))
+        # Unnormalized readout head (paper B.2)
+        self.head = nn.Linear(d_model, num_classes, bias=False)
+        # Q-head on detached state (ARC / Mini-ARC; loss weight 0.5 in train)
+        self.q_head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.q_head.weight)
+        nn.init.constant_(self.q_head.bias, -5.0)
+
+        self.reset_nGPT_weights()
+
+    def _is_unnormalized_head(self, module: nn.Module) -> bool:
+        # Paper B.2: readout is unnormalized; Q-head is a scalar probe — leave both alone.
+        return module is self.head or module is self.q_head
+
+    def reset_nGPT_weights(self) -> None:
+        """Initialize Linear / Embedding rows near unit norm (nGPT-style)."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=1.0 / math.sqrt(m.weight.shape[1]))
+                if not self._is_unnormalized_head(m):
+                    with torch.no_grad():
+                        m.weight.copy_(project_to_sphere(m.weight))
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=1.0 / math.sqrt(self.d_model))
+                with torch.no_grad():
+                    m.weight.copy_(project_to_sphere(m.weight))
+            elif isinstance(m, nn.Conv1d):
+                nn.init.normal_(m.weight, mean=0.0, std=1.0 / math.sqrt(m.kernel_size[0]))
+                with torch.no_grad():
+                    w = m.weight.view(m.weight.shape[0], -1)
+                    m.weight.copy_(project_to_sphere(w).view_as(m.weight))
+        # Re-apply Q-head prior after generic Linear init
+        nn.init.zeros_(self.q_head.weight)
+        nn.init.constant_(self.q_head.bias, -5.0)
+
+    @torch.no_grad()
+    def renorm_weights(self) -> None:
+        """Post-optimizer-step weight renormalization (paper / nGPT)."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if self._is_unnormalized_head(m):
+                    continue
+                m.weight.copy_(project_to_sphere(m.weight))
+            elif isinstance(m, nn.Embedding) and m is not self.puzzle_emb:
+                m.weight.copy_(project_to_sphere(m.weight))
+            elif isinstance(m, nn.Conv1d):
+                w = m.weight.view(m.weight.shape[0], -1)
+                m.weight.copy_(project_to_sphere(w).view_as(m.weight))
+
+    @property
+    def lambda_param(self) -> torch.Tensor:
+        return torch.sigmoid(self.raw_lambda)
+
+    def get_input_embedding(self, x: torch.Tensor, puzzle_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Token embeddings + optional puzzle embedding prepended.
+
+        Returns z_input of shape [B, puzzle_emb_len + S, D] on the sphere.
+        """
         seq_len = x.shape[1]
-        if seq_len > self.max_seq_len:
+        if seq_len + self.puzzle_emb_len > self.max_seq_len + self.puzzle_emb_len:
             raise ValueError(f"sequence length {seq_len} exceeds max_seq_len={self.max_seq_len}")
-        pos = torch.arange(seq_len, device=x.device)
-        return project_to_sphere(self.token_emb(x) + self.pos_emb(pos))
+        tok = self.token_emb(x)  # [B, S, D]
+        if self.puzzle_emb_len > 0:
+            if puzzle_ids is None:
+                puzzle_ids = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+            pe = self.puzzle_emb(puzzle_ids.clamp(0, self.n_puzzles - 1))
+            pe = pe.view(x.shape[0], self.puzzle_emb_len, self.d_model)
+            tok = torch.cat([pe, tok], dim=1)
+        return project_to_sphere(tok)
 
-    def step(self, z: torch.Tensor, z_input: torch.Tensor) -> torch.Tensor:
-        lam = torch.sigmoid(self.raw_lambda)
-        eta = torch.sigmoid(self.raw_eta)
-        z_injected = slerp(z, z_input, lam)
-        z_prop = self.core_block(z_injected)
-        return geodesic_damping(z, z_prop, eta)
+    def expand_query_mask(self, query_mask: torch.Tensor) -> torch.Tensor:
+        """Shift query mask right by puzzle_emb_len (False on puzzle tokens)."""
+        if self.puzzle_emb_len <= 0:
+            return query_mask
+        B = query_mask.shape[0]
+        pad = torch.zeros(B, self.puzzle_emb_len, dtype=torch.bool, device=query_mask.device)
+        return torch.cat([pad, query_mask], dim=1)
+
+    def propose(self, z: torch.Tensor, z_input: torch.Tensor) -> torch.Tensor:
+        """F_θ(z; x) = f_θ(Slerp_λ(z, x)) — undamped proposal (for residual / halt)."""
+        z_inj = guarded_slerp(z, z_input, self.lambda_param)
+        return self.core_block(z_inj)
+
+    def step(
+        self,
+        z: torch.Tensor,
+        z_input: torch.Tensor,
+        eta: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        One damped solver iteration.
+
+        Returns (z_next, z_tilde proposal, per-sample chordal residual).
+        ``eta`` is per-sample in (0, 1], shape [B] or broadcastable.
+        """
+        z_tilde = self.propose(z, z_input)
+        residual = chordal_residual(z, z_tilde)
+        z_next = guarded_slerp(z, z_tilde, eta)
+        return z_next, z_tilde, residual
+
+    def decode_logits(self, z: torch.Tensor) -> torch.Tensor:
+        return self.s_z * self.head(z)
+
+    def q_logits(self, z: torch.Tensor) -> torch.Tensor:
+        """Q-head on mean-pooled state (call with detached z)."""
+        return self.q_head(z.mean(dim=1)).squeeze(-1)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
