@@ -8,12 +8,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from ebm.dataset.loader import SudokuDataset
-from ebm.dataset.splits import split_dataset
+from ebm.dataset.splits import resolve_holdout_sizes, split_dataset
 from ebm.dataset.torch_dataset import SudokuTorchDataset
 from ebm.evaluation.metrics import evaluate
 from ebm.evaluation.solver import solve_dataset
 from ebm.model.jepa import InferenceConfig, SudokuJEPA
-from ebm.training.checkpoint import CheckpointManager
+from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager
 from ebm.training.trainer import Trainer, TrainerConfig
 from ebm.utils.config import ArchitectureConfig, Config, TrainingConfig, tiny_architecture
 from ebm.utils.device import auto_scale_config
@@ -44,6 +44,12 @@ def train(args: argparse.Namespace) -> None:
 
     if args.epochs:
         train_cfg = train_cfg.model_copy(update={'epochs': args.epochs})
+    if args.val_size is not None:
+        train_cfg = train_cfg.model_copy(update={'val_size': args.val_size})
+    if args.test_size is not None:
+        train_cfg = train_cfg.model_copy(update={'test_size': args.test_size})
+    if args.split_seed is not None:
+        train_cfg = train_cfg.model_copy(update={'split_seed': args.split_seed})
 
     train_cfg = auto_scale_config(train_cfg, batch_size_override=args.batch_size)
 
@@ -55,18 +61,18 @@ def train(args: argparse.Namespace) -> None:
         df = ds.load_split('train')
     logger.info('Dataset size: %d', len(df))
 
-    val_size = train_cfg.val_size
-    test_size = train_cfg.test_size
-    if val_size + test_size >= len(df):
-        val_size = max(1, int(len(df) * 0.05))
-        test_size = max(1, int(len(df) * 0.05))
-
-    # Hold out a slice of HF train for validation; official HF test is used by eval.
-    train_df, val_df, _ = split_dataset(df, val_size=val_size, test_size=test_size)
-    logger.info('Train: %d | Val: %d', len(train_df), len(val_df))
+    val_size, test_size = resolve_holdout_sizes(len(df), train_cfg.val_size, train_cfg.test_size)
+    train_df, val_df, test_df = split_dataset(
+        df,
+        val_size=val_size,
+        test_size=test_size,
+        seed=train_cfg.split_seed,
+    )
+    logger.info('Train: %d | Val: %d | Test (held out): %d', len(train_df), len(val_df), len(test_df))
 
     train_ds = SudokuTorchDataset(train_df)
     val_ds = SudokuTorchDataset(val_df)
+    test_ds = SudokuTorchDataset(test_df)
 
     train_loader = DataLoader(
         train_ds,
@@ -82,12 +88,30 @@ def train(args: argparse.Namespace) -> None:
         num_workers=train_cfg.num_workers,
         pin_memory=train_cfg.pin_memory,
     )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=train_cfg.batch_size,
+        shuffle=False,
+        num_workers=train_cfg.num_workers,
+        pin_memory=train_cfg.pin_memory,
+    )
 
     model = SudokuJEPA(arch_cfg, train_cfg)
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{param_count:,}')
 
-    trainer = Trainer(model, train_loader, val_loader, TrainerConfig(app=app_cfg, arch=arch_cfg, train=train_cfg))
+    resume_from: Path | None = None
+    if args.resume:
+        resume_from = Path(args.checkpoint) if args.checkpoint else train_cfg.checkpoint_dir / LAST_CHECKPOINT_NAME
+
+    trainer = Trainer(
+        model,
+        train_loader,
+        val_loader,
+        TrainerConfig(app=app_cfg, arch=arch_cfg, train=train_cfg),
+        test_loader=test_loader,
+        resume_from=resume_from,
+    )
     trainer.train()
 
 
@@ -156,10 +180,24 @@ def main() -> None:
     train_parser.add_argument('--epochs', type=int, help='Number of training epochs')
     train_parser.add_argument('--batch-size', type=int, help='Training batch size')
     train_parser.add_argument('--n-samples', type=int, help='Limit HF train split to first N samples')
+    train_parser.add_argument('--val-size', type=int, help='Validation holdout size (from HF train pool)')
+    train_parser.add_argument('--test-size', type=int, help='Test holdout size (from HF train pool)')
+    train_parser.add_argument('--split-seed', type=int, help='Random seed for train/val/test split')
     train_parser.add_argument(
         '--tiny',
         action='store_true',
         help='Use a small architecture suitable for CPU / smoke runs',
+    )
+    train_parser.add_argument(
+        '--continue',
+        dest='resume',
+        action='store_true',
+        help=f'Resume from checkpoints/{LAST_CHECKPOINT_NAME} if it exists',
+    )
+    train_parser.add_argument(
+        '--checkpoint',
+        type=str,
+        help='Checkpoint file to resume from (with --continue; default: checkpoint.last.pt in checkpoint dir)',
     )
 
     eval_parser = subparsers.add_parser('eval', help='Evaluate a trained model')

@@ -4,6 +4,38 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
+def resolve_holdout_sizes(
+    n: int,
+    val_size: int,
+    test_size: int,
+    *,
+    fraction: float = 0.05,
+) -> tuple[int, int]:
+    """
+    Return validation and test counts that leave at least one training row.
+
+    When ``val_size + test_size`` would consume the whole dataset (typical for
+    small ``--n-samples`` runs against multi-million defaults), scale holdouts
+    to ``fraction`` of ``n`` each, at least 1 per split when possible.
+    """
+    if n < 3:
+        msg = f'Need at least 3 samples for train/val/test split, got {n}'
+        raise ValueError(msg)
+    if val_size + test_size < n:
+        return val_size, test_size
+
+    val = max(1, int(n * fraction))
+    test = max(1, int(n * fraction))
+    max_holdout = n - 1
+    if val + test > max_holdout:
+        val = max(1, max_holdout // 2)
+        test = max_holdout - val
+        if test < 1:
+            test = 1
+            val = max(1, max_holdout - 1)
+    return val, test
+
+
 def split_dataset(
     df: pd.DataFrame,
     val_size: int = 500_000,

@@ -2,14 +2,38 @@
 
 import heapq
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 from torch import nn
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 
 logger = logging.getLogger(__name__)
+
+LAST_CHECKPOINT_NAME = 'checkpoint.last.pt'
+_TOP_K_PATTERN = re.compile(r'^checkpoint_epoch(\d+)_acc([\d.]+)\.pt$')
+
+
+def resolve_resume_position(
+    saved_epoch: int,
+    batch_in_epoch: int | None,
+    batches_per_epoch: int,
+) -> tuple[int, int]:
+    """
+    Map checkpoint epoch/batch fields to the next training loop position.
+
+    Returns:
+        ``(start_epoch, skip_batches)`` — skip_batches applies only on start_epoch.
+
+    """
+    if batch_in_epoch is None:
+        return saved_epoch + 1, 0
+    if batch_in_epoch >= batches_per_epoch:
+        return saved_epoch + 1, 0
+    return saved_epoch, batch_in_epoch
 
 
 @dataclass(order=True)
@@ -30,6 +54,7 @@ class _CheckpointData:
     step: int
     val_energy: float
     cell_accuracy: float
+    batch_in_epoch: int = 0
 
 
 class CheckpointManager:
@@ -79,10 +104,42 @@ class CheckpointManager:
             evicted = heapq.heapreplace(self._heap, entry)
             if evicted.path.exists():
                 evicted.path.unlink()
-                logger.info('Removed checkpoint %s', evicted.path.name)
+                logger.debug('Removed checkpoint %s', evicted.path.name)
             return path
 
         return None
+
+    def save_last(self, data: _CheckpointData, scheduler: LRScheduler) -> Path:
+        """Always write the latest training state for ``--continue`` resume."""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = self.checkpoint_dir / LAST_CHECKPOINT_NAME
+        torch.save(
+            {
+                'model_state_dict': data.model.state_dict(),
+                'optimizer_state_dict': data.optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'epoch': data.epoch,
+                'step': data.step,
+                'val_energy': data.val_energy,
+                'cell_accuracy': data.cell_accuracy,
+                'batch_in_epoch': data.batch_in_epoch,
+            },
+            path,
+        )
+        return path
+
+    def reindex_from_disk(self) -> None:
+        """Rebuild the top-K heap from existing ``checkpoint_epoch*_acc*.pt`` files."""
+        self._heap.clear()
+        for path in sorted(self.checkpoint_dir.glob('checkpoint_epoch*.pt')):
+            match = _TOP_K_PATTERN.match(path.name)
+            if not match:
+                continue
+            entry = _CheckpointEntry(metric=float(match.group(2)), path=path)
+            if len(self._heap) < self.keep_top_k:
+                heapq.heappush(self._heap, entry)
+            elif entry.metric > self._heap[0].metric:
+                heapq.heapreplace(self._heap, entry)
 
     @property
     def best_path(self) -> Path | None:
@@ -102,13 +159,19 @@ class CheckpointManager:
                 'step': data.step,
                 'val_energy': data.val_energy,
                 'cell_accuracy': data.cell_accuracy,
+                'batch_in_epoch': data.batch_in_epoch,
             },
             path,
         )
-        logger.info('Saved checkpoint %s (cell_acc=%.4f)', path.name, data.cell_accuracy)
+        logger.debug('Saved checkpoint %s (cell_acc=%.4f)', path.name, data.cell_accuracy)
 
     @staticmethod
-    def load(path: Path, model: nn.Module, optimizer: Optimizer | None = None) -> dict:
+    def load(
+        path: Path,
+        model: nn.Module,
+        optimizer: Optimizer | None = None,
+        scheduler: LRScheduler | None = None,
+    ) -> dict:
         """
         Load a checkpoint from disk.
 
@@ -116,6 +179,7 @@ class CheckpointManager:
             path: Path to checkpoint file.
             model: Model to load state into.
             optimizer: Optional optimizer to load state into.
+            scheduler: Optional LR scheduler to load state into.
 
         Returns:
             The full checkpoint dict (with epoch, step, val_energy).
@@ -123,6 +187,8 @@ class CheckpointManager:
         """
         checkpoint = torch.load(path, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
-        if optimizer:
+        if optimizer and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         return checkpoint

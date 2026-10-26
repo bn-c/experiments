@@ -55,8 +55,13 @@ class TrainingConfig(BaseModel):
     pin_memory: bool = Field(default=True, description='Pin memory in DataLoader.')
     checkpoint_dir: Path = Field(default=Path('checkpoints'), description='Directory for saving checkpoints.')
     keep_top_k: int = Field(default=3, description='Number of best checkpoints to keep.')
+    checkpoint_interval_sec: int = Field(
+        default=900,
+        description='Minimum seconds between validation checkpoints (default 15 min; use ~1200 for 20 min).',
+    )
     val_size: int = Field(default=500_000, description='Validation set size.')
     test_size: int = Field(default=500_000, description='Test set size.')
+    split_seed: int = Field(default=42, description='Random seed for train/val/test split.')
     langevin_steps: int = Field(default=50, description='Langevin dynamics steps at inference.')
     langevin_lr: float = Field(default=0.01, description='Langevin dynamics step size.')
     langevin_noise_scale: float = Field(default=0.005, description='Langevin dynamics noise scale.')
