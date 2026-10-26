@@ -101,13 +101,13 @@ def run_batch(
                 break
             z, residual, state = solver_step(model, z, z_input, state, cfg, pad_mask=pad_mask)
             last_residual = residual
+        qmask = model.expand_query_mask(m)  # accounts for puzzle-emb prefix
         logits = model.decode_logits(z)
         preds: list[np.ndarray] = []
         exact = np.zeros(b, dtype=bool)
         for i in range(b):
-            qi = m[i]
-            pred_i = logits[i][qi].argmax(dim=-1).detach().cpu().numpy()
-            tgt_i = y[i][qi].detach().cpu().numpy()
+            pred_i = logits[i][qmask[i]].argmax(dim=-1).detach().cpu().numpy()
+            tgt_i = y[i][m[i]].detach().cpu().numpy()
             preds.append(pred_i)
             exact[i] = bool(np.array_equal(pred_i, tgt_i))
     return (
