@@ -4,7 +4,10 @@ __pycache__/
 *.so
 .env
 checkpoints/
-data/
+# Root-level downloads only; keep sfprm_miniarc/data/*.py tracked.
+/data/
+sfprm_miniarc/data/mini_arc/*.json
+sfprm_miniarc/checkpoints/
 *.log
 
 outputs/

@@ -24,6 +24,7 @@ four direction-selective channels, object-motion sensitivity, looming).
 | [tests/](tests/) | Unit tests: geometry, resolution invariance, dual regime, DSGC tuning, looming, OMS, device migration, ViT, manifold mapping |
 | [enso/](enso/) | In-tree Sudoku EBM (Enso fork) on HF `sapientinc/sudoku-extreme` — not a git submodule |
 | [trm/](trm/) | TRM-MLP Sudoku experiment ([arXiv:2510.04871](https://arxiv.org/abs/2510.04871)) — staging, not full paper reproduction |
+| [sfprm_miniarc/](sfprm_miniarc/) | SFPRM Mini-ARC baseline (spherical weight-tied reasoner, Muon+AdamW, W&B) |
 
 ## Usage
 

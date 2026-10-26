@@ -1,0 +1,5 @@
+torch>=2.3
+numpy
+tqdm
+einops
+wandb
