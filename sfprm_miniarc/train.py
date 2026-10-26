@@ -111,7 +111,7 @@ def eval_metrics(
 ) -> dict[str, float]:
     """Unaugmented Mini-ARC eval: chordal-halting Pass@1 + fixed-k CE loss.
 
-    Returns keys suitable for ``val/*`` (and aliased ``eval/*``) W&B logging.
+    Returns keys suitable for ``val/*`` W&B logging.
     """
     model.eval()
     amp_device = "cuda" if device.type == "cuda" else "cpu"
@@ -294,15 +294,12 @@ def train(args: argparse.Namespace) -> None:
                 f"loss={metrics['loss']:.4f} mean_halt={mean_halt:.1f}"
             )
             if wandb_on:
-                # Primary TRM-style val/* panel; keep eval/* aliases for older dashboards.
                 wandb.log(
                     {
                         "val/pass_at_1": pas,
                         "val/cell_accuracy": metrics["cell_accuracy"],
                         "val/loss": metrics["loss"],
                         "val/mean_halt_steps": mean_halt,
-                        "eval/pass_at_1": pas,
-                        "eval/mean_halt_steps": mean_halt,
                     },
                     step=step,
                 )
