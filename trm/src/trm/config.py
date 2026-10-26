@@ -8,6 +8,16 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class AppConfig(BaseSettings):
+    """Application settings loaded from `.env` (same env vars as enso/)."""
+
+    model_config = SettingsConfigDict(env_file='.env')
+
+    wandb_api_key: str | None = Field(description='The API key for the Weights and Biases API.', default=None)
+    wandb_project: str | None = Field(description='The project name for the Weights and Biases API.', default=None)
+    wandb_entity: str | None = Field(description='The entity name for the Weights and Biases API.', default=None)
+
+
 class ModelConfig(BaseSettings):
     """TRM-MLP hyperparameters (paper defaults for Sudoku-Extreme)."""
 
