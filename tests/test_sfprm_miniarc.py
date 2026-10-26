@@ -155,6 +155,14 @@ def test_variational_mask_locked_across_segment_iters():
     assert len(masks) == 1
 
 
+def test_train_compile_flag_default_off():
+    """--compile is opt-in; wiring is in train() (model.step), not required on CPU CI."""
+    import train as train_mod  # noqa: E402
+
+    assert train_mod.parse_args([]).compile is False
+    assert train_mod.parse_args(["--compile"]).compile is True
+
+
 def test_token_pad_mask_and_residual():
     model = SFPRM(
         vocab_size=12,
