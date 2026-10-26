@@ -1,12 +1,14 @@
 """Mini-ARC ingestion, D₄ + color-perm augmentation, in-device tensor cache.
 
-Sequence packing (gap fill; documented here and in README):
-  PAD_ID = 10 (vocab_size=11). Colors are tokens 0–9.
-  For each sample we concatenate up to ``max_demos`` demonstration pairs as
-  ``flatten(input) || flatten(output)``, then the query input grid.
-  ``query_mask`` selects the 25 query-input positions; the supervision target
-  at those positions is the flattened query output (predict transform in place).
-  With max_seq_len=128 this fits 2 demos + query (125 tokens), then PAD to 128.
+Paper Mini-ARC (App. B / Table 3): one 5×5 input grid → predict the 5×5 output
+(``seq_len=25`` cell tokens + puzzle emb). Train on the task's demonstration
+pairs; eval on the test pair. Matches "528 demo pairs × augs" / "a puzzle is
+25 cell tokens".
+
+PAD_ID = 10; SEP_ID = 11 reserved (vocab_size=12). Colors are tokens 0–9.
+
+Note: pre-seq25 desk runs (EX-33) used packed demos+query ≤128. That path is
+gone; those checkpoints are unsupported — retrain with this formulation.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import torch
 
 GRID = 5
 CELLS = GRID * GRID
+PAPER_SEQ_LEN = CELLS  # paper Mini-ARC sequence length
 PAD_ID = 10
 SEP_ID = 11  # paper Mini-ARC vocab=12 (colors 0–9 + PAD + SEP)
 NUM_COLORS = 10  # 0–9; 0 is background (not permuted)
@@ -93,46 +96,21 @@ def random_color_perm(rng: random.Random) -> np.ndarray:
     return perm
 
 
-def pack_sequence(
-    demos: list[tuple[np.ndarray, np.ndarray]],
-    query_in: np.ndarray,
-    query_out: np.ndarray,
-    max_seq_len: int = 128,
-    max_demos: int | None = None,
+def pack_demo_pair(
+    grid_in: np.ndarray,
+    grid_out: np.ndarray,
+    max_seq_len: int = PAPER_SEQ_LEN,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pack demos + query into fixed-length token / target / mask arrays."""
-    # Reserve CELLS for query_in; each demo costs 2 * CELLS.
-    room = max_seq_len - CELLS
-    fit = max(0, room // (2 * CELLS))
-    if max_demos is not None:
-        fit = min(fit, max_demos)
-    demos = demos[:fit]
-
-    tokens: list[int] = []
-    for inp, out in demos:
-        tokens.extend(inp.reshape(-1).tolist())
-        tokens.extend(out.reshape(-1).tolist())
-    q_start = len(tokens)
-    tokens.extend(query_in.reshape(-1).tolist())
-    q_end = len(tokens)
-
-    if len(tokens) > max_seq_len:
-        raise ValueError(f"packed length {len(tokens)} > max_seq_len={max_seq_len}")
-
-    pad_n = max_seq_len - len(tokens)
-    tokens.extend([PAD_ID] * pad_n)
-
+    """Paper seq-25: tokens = flatten(input), targets = flatten(output)."""
+    if max_seq_len < CELLS:
+        raise ValueError(f"max_seq_len={max_seq_len} < CELLS={CELLS}")
+    tokens = np.full(max_seq_len, PAD_ID, dtype=np.int64)
     targets = np.full(max_seq_len, PAD_ID, dtype=np.int64)
-    targets[q_start:q_end] = query_out.reshape(-1)
-
     mask = np.zeros(max_seq_len, dtype=bool)
-    mask[q_start:q_end] = True
-
-    return (
-        np.asarray(tokens, dtype=np.int64),
-        targets,
-        mask,
-    )
+    tokens[:CELLS] = grid_in.reshape(-1)
+    targets[:CELLS] = grid_out.reshape(-1)
+    mask[:CELLS] = True
+    return tokens, targets, mask
 
 
 def _transform_task(
@@ -155,17 +133,18 @@ def build_cache(
     data_dir: Path,
     *,
     device: torch.device,
-    max_seq_len: int = 128,
+    max_seq_len: int = PAPER_SEQ_LEN,
     augment: bool = True,
     n_color_perms: int = 8,
     seed: int = 0,
     max_tasks: int | None = None,
 ) -> MiniARCCache:
     """
-    Load Mini-ARC tasks and cache packed tensors on ``device``.
+    Load Mini-ARC tasks and cache tensors on ``device``.
 
-    When ``augment`` is True: 8 D₄ × ``n_color_perms`` random color maps per task.
-    When False: one unaugmented sample per task (eval).
+    When ``augment`` is True: 8 D₄ × ``n_color_perms`` random color maps per task;
+    emit one seq-25 sample per demonstration pair × aug.
+    When False: one unaugmented test I→O sample per task (eval).
     """
     files = list_task_files(data_dir)
     if max_tasks is not None:
@@ -197,12 +176,15 @@ def build_cache(
         for d4_k in d4_ks:
             for perm in perms:
                 demos, q_in, q_out = _transform_task(task, d4_k, perm)
-                tok, tgt, mask = pack_sequence(demos, q_in, q_out, max_seq_len=max_seq_len)
-                all_tokens.append(tok)
-                all_targets.append(tgt)
-                all_masks.append(mask)
-                all_puzzle.append(pid)
-                task_ids.append(tid)
+                # Paper: train on demonstration pairs; eval on the test pair.
+                pairs = demos if augment else [(q_in, q_out)]
+                for inp, out in pairs:
+                    tok, tgt, mask = pack_demo_pair(inp, out, max_seq_len=max_seq_len)
+                    all_tokens.append(tok)
+                    all_targets.append(tgt)
+                    all_masks.append(mask)
+                    all_puzzle.append(pid)
+                    task_ids.append(tid)
 
     tokens = torch.tensor(np.stack(all_tokens), dtype=torch.long, device=device)
     targets = torch.tensor(np.stack(all_targets), dtype=torch.long, device=device)

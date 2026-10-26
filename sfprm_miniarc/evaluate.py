@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.dataset import VOCAB_SIZE, build_cache  # noqa: E402
+from data.dataset import PAPER_SEQ_LEN, VOCAB_SIZE, build_cache  # noqa: E402
 from models.sfprm_core import (  # noqa: E402
     DEFAULT_D_FF,
     DEFAULT_D_MODEL,
@@ -120,6 +120,13 @@ def _build_model_from_ckpt(ckpt: dict, args: argparse.Namespace, device: torch.d
     n_layers = int(a.get("n_layers", args.n_layers))
     max_seq_len = int(a.get("max_seq_len", args.max_seq_len))
     puzzle_emb_len = int(a.get("puzzle_emb_len", args.puzzle_emb_len))
+    # EX-33 packed (len≤128) ckpts are unsupported — retrain under seq-25.
+    if max_seq_len != PAPER_SEQ_LEN:
+        raise ValueError(
+            f"checkpoint max_seq_len={max_seq_len} != paper seq-25; "
+            "packed EX-33 checkpoints are unsupported — retrain with demo-pair seq-25"
+        )
+    args.max_seq_len = max_seq_len
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     # Infer n_puzzles from puzzle_emb weight if present
     n_puzzles = 149
@@ -151,7 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--epsilon", type=float, default=None, help=argparse.SUPPRESS)
     p.add_argument("--max_loops", type=int, default=200)
     p.add_argument("--gamma", type=float, default=0.9)
-    p.add_argument("--max_seq_len", type=int, default=128)
+    p.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=PAPER_SEQ_LEN,
+        help="Token length (paper Mini-ARC = 25; overridden by ckpt args)",
+    )
     p.add_argument("--d_model", type=int, default=DEFAULT_D_MODEL)
     p.add_argument("--n_heads", type=int, default=DEFAULT_N_HEADS)
     p.add_argument("--d_ff", type=int, default=DEFAULT_D_FF)
@@ -173,6 +185,9 @@ def main(argv: list[str] | None = None) -> int:
 
     device = resolve_device(args.device)
     use_amp = device.type == "cuda"
+
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model = _build_model_from_ckpt(ckpt, args, device)
     cache = build_cache(
         Path(args.data_dir),
         device=device,
@@ -180,9 +195,6 @@ def main(argv: list[str] | None = None) -> int:
         augment=False,
         max_tasks=args.max_tasks,
     )
-
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model = _build_model_from_ckpt(ckpt, args, device)
 
     wandb_on = maybe_init_wandb(args)
     hits = 0

@@ -29,10 +29,11 @@ from data.dataset import (  # noqa: E402
     CELLS,
     GRID,
     NUM_COLORS,
+    PAPER_SEQ_LEN,
     _transform_task,
     list_task_files,
     load_task_json,
-    pack_sequence,
+    pack_demo_pair,
     random_color_perm,
 )
 from evaluate import _build_model_from_ckpt, resolve_device  # noqa: E402
@@ -161,7 +162,12 @@ def main() -> int:
     p.add_argument("--tau", type=float, default=0.01)
     p.add_argument("--max_loops", type=int, default=200)
     p.add_argument("--gamma", type=float, default=0.9)
-    p.add_argument("--max_seq_len", type=int, default=128)
+    p.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=PAPER_SEQ_LEN,
+        help="Token length (paper Mini-ARC = 25; overridden by ckpt args)",
+    )
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--max_tasks", type=int, default=None)
     p.add_argument("--no_ema", action="store_true")
@@ -181,6 +187,7 @@ def main() -> int:
         use_ema=not args.no_ema,
     )
     model = _build_model_from_ckpt(ckpt, ns, device)
+    args.max_seq_len = ns.max_seq_len
     model.eval()
 
     files = list_task_files(Path(args.data_dir))
@@ -209,9 +216,9 @@ def main() -> int:
         mask_list: list[np.ndarray] = []
         for d4_k in range(8):
             for perm in perms:
-                demos_a, q_in_a, q_out_a = _transform_task(task, d4_k, perm)
-                tok_a, tgt_a, mask_a = pack_sequence(
-                    demos_a, q_in_a, q_out_a, max_seq_len=args.max_seq_len
+                _demos_a, q_in_a, q_out_a = _transform_task(task, d4_k, perm)
+                tok_a, tgt_a, mask_a = pack_demo_pair(
+                    q_in_a, q_out_a, max_seq_len=args.max_seq_len
                 )
                 tok_list.append(tok_a)
                 tgt_list.append(tgt_a)

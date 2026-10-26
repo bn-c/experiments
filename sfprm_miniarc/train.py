@@ -2,7 +2,8 @@
 """Truncated BPTT training for SFPRM on Mini-ARC (paper-faithful solver + nGPT).
 
 Defaults follow arXiv:2610.25646 Appendix B / Table 3 (Mini-ARC), except desk
-keeps steps=12_000 and aug packing 149×64. Dims scaled for 1×16GB GPU.
+keeps steps=12_000 and aug count D₄×8 (=64). Sequences are paper demo-pair
+seq-25. Dims scaled for 1×16GB GPU.
 """
 
 from __future__ import annotations
@@ -22,7 +23,13 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.dataset import VOCAB_SIZE, MiniARCCache, build_cache, make_train_indices  # noqa: E402
+from data.dataset import (  # noqa: E402
+    PAPER_SEQ_LEN,
+    VOCAB_SIZE,
+    MiniARCCache,
+    build_cache,
+    make_train_indices,
+)
 from models.ema import EMAModel  # noqa: E402
 from models.sfprm_core import (  # noqa: E402
     DEFAULT_D_FF,
@@ -248,7 +255,10 @@ def train(args: argparse.Namespace) -> None:
         max_tasks=args.max_tasks,
     )
     n_puzzles = int(train_cache.puzzle_ids.max().item()) + 1 if len(train_cache) else 1
-    print(f"Train cache: {len(train_cache)} samples on {device}; eval tasks: {len(eval_cache)}; puzzles={n_puzzles}")
+    print(
+        f"Train cache: {len(train_cache)} samples on {device}; eval tasks: {len(eval_cache)}; "
+        f"puzzles={n_puzzles}; max_seq_len={args.max_seq_len}"
+    )
 
     model = SFPRM(
         vocab_size=VOCAB_SIZE,
@@ -473,7 +483,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--d_ff", type=int, default=DEFAULT_D_FF)
     p.add_argument("--n_layers", type=int, default=DEFAULT_N_LAYERS)
     p.add_argument("--puzzle_emb_len", type=int, default=1)
-    p.add_argument("--max_seq_len", type=int, default=128)
+    p.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=PAPER_SEQ_LEN,
+        help="Token length (paper Mini-ARC demo-pair = 25)",
+    )
     p.add_argument("--n_color_perms", type=int, default=8, help="D₄×this = 64 augs/task (desk)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data_dir", type=str, default=str(ROOT / "data" / "mini_arc"))

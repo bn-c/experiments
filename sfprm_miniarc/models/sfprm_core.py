@@ -391,9 +391,9 @@ class SFPRM(nn.Module):
 
     def token_pad_mask(self, x: torch.Tensor, pad_id: int = PAD_ID) -> torch.Tensor:
         """
-        Valid-token mask for packed sequences (+ puzzle emb), shape [B, puzzle+S].
+        Valid-token mask for sequences (+ puzzle emb), shape [B, puzzle+S].
 
-        True = real content (puzzle emb + non-PAD tokens). PAD packing slots are False
+        True = real content (puzzle emb + non-PAD tokens). PAD slots are False
         so chordal halt / attention ignore them.
         """
         valid = x != pad_id  # [B, S]

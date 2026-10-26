@@ -12,11 +12,21 @@ Table 3, scaled for a **1×16GB GPU** desk run.
 | L_layers | 2 | 2 |
 | SwiGLU, RoPE, causal conv k=4 | yes | yes |
 | puzzle-emb length | 1 | 1 |
-| vocab / packing | 12 / seq 25 | 12 / **packed demos+query ≤128** (desk) |
+| vocab / sequence | 12 / **seq 25** (demo-pair I→O) | 12 / **seq 25** (demo-pair I→O) |
 | trainable params | 6.83M (listed) | **~4.79M** (counted; 512-wide SwiGLU×2L ≈8.48M) |
 
 Paper ratios kept (heads=8, MLP×4, L=2); width scaled so batch 512 + BPTT K=6 +
 carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have headroom.
+
+### Sequence layout
+
+Each sample is one 5×5 input grid → predict the 5×5 output (25 cell tokens +
+puzzle emb). Train emits each demonstration pair × aug; eval / vote use the
+test pair only. Matches paper App. B (“528 demo pairs”, “a puzzle is 25 cell
+tokens”).
+
+EX-33 packed demos+query ≤128 is **removed**. Those checkpoints are unsupported
+— retrain under this formulation.
 
 ## Paper knobs matched
 
@@ -26,18 +36,13 @@ carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have head
 - **Reg:** weight drop 0.05, variational drop 0.2, EMA 0.999, Q-head loss 0.5,
   λ init **0.1**
 - **Optim:** Muon lr **5e-3**, weight decay **0.1**, AdamW 1e-3, puzzle-emb lr/wd **1e-2 / 0**
+- **Sequence:** demo-pair seq-25 + puzzle emb (train on demos; eval / vote on test)
 
 ## Desk knobs kept (intentionally not paper)
 
 - Steps **12,000** (paper ~68,993)
-- Aug **149×64** via D₄×`n_color_perms=8` + current packing (paper 149×100, seq 25)
-
-## Remaining gaps vs paper
-
-- Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation (PAD slots are masked in attn + chordal residual)
-- Width 384 vs paper 512 (16GB); full-width flag available
-- Global batch 512 vs paper 768
-- γ_eval=0.9 (paper Mini-ARC train/eval both 0.9) — OK; Sudoku uses 0.99 at eval
+- Aug **D₄×`n_color_perms=8`** (=64; paper 100×)
+- Width 384 vs paper 512; global batch 512 vs paper 768
 
 ## Layout
 
@@ -89,7 +94,7 @@ One-off timing of paper `SFPRM.step(z, z_input, eta)` (static shapes, `no_grad` 
 
 ```bash
 cd sfprm_miniarc
-python scripts/bench_compile.py --batch 64 --d-model 384
+python scripts/bench_compile.py --batch 64 --d-model 384 --seq-len 26
 ```
 
 Desk ROCm 7.1 (baseline tree, pre-paper API) saw ~2.1–2.4×; re-run after the paper `step` signature change before citing numbers.

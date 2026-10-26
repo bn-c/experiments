@@ -90,7 +90,7 @@ def test_desk_param_count_range():
         d_model=DEFAULT_D_MODEL,
         d_ff=DEFAULT_D_FF,
         n_layers=2,
-        max_seq_len=128,
+        max_seq_len=25,
         n_puzzles=149,
     )
     n = model.count_parameters()
@@ -161,6 +161,99 @@ def test_train_compile_flag_default_off():
 
     assert train_mod.parse_args([]).compile is False
     assert train_mod.parse_args(["--compile"]).compile is True
+
+
+def test_train_defaults_paper_seq25():
+    import train as train_mod  # noqa: E402
+
+    args = train_mod.parse_args([])
+    assert args.max_seq_len == 25
+
+
+def test_pack_demo_pair_seq25():
+    import numpy as np
+    from data.dataset import CELLS, pack_demo_pair
+
+    grid_in = np.arange(CELLS, dtype=np.int64).reshape(5, 5) % 10
+    grid_out = (grid_in + 1) % 10
+    tok, tgt, mask = pack_demo_pair(grid_in, grid_out)
+    assert tok.shape == (25,)
+    assert bool(mask.all())
+    assert np.array_equal(tok, grid_in.reshape(-1))
+    assert np.array_equal(tgt, grid_out.reshape(-1))
+
+
+def test_build_cache_demo_pair(tmp_path):
+    import json
+
+    import numpy as np
+    import torch
+    from data.dataset import build_cache
+
+    task = {
+        "train": [
+            {
+                "input": np.zeros((5, 5), dtype=int).tolist(),
+                "output": np.ones((5, 5), dtype=int).tolist(),
+            },
+            {
+                "input": (np.ones((5, 5), dtype=int) * 2).tolist(),
+                "output": (np.ones((5, 5), dtype=int) * 3).tolist(),
+            },
+        ],
+        "test": [
+            {
+                "input": (np.ones((5, 5), dtype=int) * 4).tolist(),
+                "output": (np.ones((5, 5), dtype=int) * 5).tolist(),
+            }
+        ],
+    }
+    path = tmp_path / "toy.json"
+    path.write_text(json.dumps(task))
+
+    device = torch.device("cpu")
+    # Train: 2 demos × 8 D4 × 1 color = 16
+    train_dp = build_cache(
+        tmp_path,
+        device=device,
+        augment=True,
+        n_color_perms=1,
+        seed=0,
+    )
+    assert train_dp.tokens.shape == (16, 25)
+    assert bool(train_dp.query_mask.all())
+    # Eval: one test row
+    eval_dp = build_cache(tmp_path, device=device, augment=False, n_color_perms=1)
+    assert eval_dp.tokens.shape == (1, 25)
+    assert int(eval_dp.tokens[0, 0].item()) == 4
+    assert int(eval_dp.targets[0, 0].item()) == 5
+
+
+def test_reject_packed_checkpoint_seqlen():
+    """EX-33 packed ckpts (max_seq_len=128) must not load under seq-25-only eval."""
+    import argparse
+
+    import torch
+    from evaluate import _build_model_from_ckpt
+
+    ckpt = {
+        "args": {"d_model": 32, "n_heads": 4, "d_ff": 64, "n_layers": 1, "max_seq_len": 128},
+        "model": {},
+    }
+    ns = argparse.Namespace(
+        d_model=32,
+        n_heads=4,
+        d_ff=64,
+        n_layers=1,
+        max_seq_len=25,
+        puzzle_emb_len=1,
+        use_ema=False,
+    )
+    try:
+        _build_model_from_ckpt(ckpt, ns, torch.device("cpu"))
+        raise AssertionError("expected ValueError for packed max_seq_len")
+    except ValueError as e:
+        assert "unsupported" in str(e).lower() or "seq-25" in str(e)
 
 
 def test_token_pad_mask_and_residual():
