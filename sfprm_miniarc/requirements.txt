@@ -3,3 +3,5 @@ numpy
 tqdm
 einops
 wandb
+datasets>=2.19
+huggingface_hub>=0.23

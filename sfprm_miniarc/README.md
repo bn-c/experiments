@@ -1,7 +1,7 @@
 # SFPRM Mini-ARC baseline
 
 Spherical Fixed-Point Reasoner Model (weight-tied nGPT on \(S^{d-1}\)) trained on
-[Mini-ARC](https://github.com/KSB21ST/MINI-ARC) (149 × 5×5 ARC-style tasks).
+Mini-ARC (149 × 5×5 ARC-style tasks; Kim et al., NeurIPS 2022 nCSI workshop).
 
 Architecture matches the execution guide (`d_model=512`, `d_ff=1536`, one
 weight-tied block) → **~2.70M params** (the guide’s “~6.83M” figure is
@@ -12,7 +12,7 @@ Pass@1** with adaptive chordal halting at eval.
 
 ```text
 sfprm_miniarc/
-├── data/download_miniarc.py   # pulls KSB21ST/MINI-ARC data/MiniARC
+├── data/download_miniarc.py   # HF andrewcropper/ilp-datasets mini-arc/ → JSON
 ├── data/dataset.py            # D₄ + color-perm augs, in-device cache
 ├── models/spherical_ops.py    # slerp / project / geodesic damping
 ├── models/sfprm_core.py       # weight-tied NormalizedTransformerBlock + SFPRM
@@ -56,8 +56,13 @@ python train.py --steps 3 --bptt_k 2 --batch_size 4 --max_tasks 4 --eval_every 3
 
 ### Mini-ARC source
 
-Downloaded from **https://github.com/KSB21ST/MINI-ARC** (`data/MiniARC/`, 149
-JSON files, standard ARC `{train,test}` schema). See `data/download_miniarc.py`.
+Hugging Face **`andrewcropper/ilp-datasets`**, subset path **`mini-arc/`**
+(149 task dirs, each with `train/` + `test/` Prolog). `download_miniarc.py`
+pulls that tree via `huggingface_hub.snapshot_download`, converts to ARC
+`{train,test}` JSON (same Kim et al. tasks as KSB21ST/MINI-ARC), and caches
+under `data/mini_arc/*.json` (gitignored). There is no tabular
+`load_dataset` config on that repo; the script builds a `datasets.Dataset`
+from the converted rows before writing the local cache.
 
 ### Sequence packing
 
