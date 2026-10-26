@@ -19,8 +19,8 @@ This directory is a **staging area**: the code mirrors the paper’s TRM-MLP loo
 ### v1 simplifications
 
 - **Augmentation**: we load the first `--train-size` rows (default **1000**) from the HF train CSV only. We do **not** apply 1000× Sudoku-preserving permutations per puzzle yet; that is the main gap vs. the paper’s small-sample regime.
-- **ACT / Q-head**: omitted (paper’s adaptive halting and extra forward pass are not implemented).
-- **Stable-max loss**: standard cross-entropy on **empty** cells only.
+- **ACT**: halt Q-head only (paper ``no_ACT_continue``): BCE on “sequence fully correct”, early exit when ``q_halt > 0``. No continue-Q / second forward pass.
+- **Stable-max loss**: standard cross-entropy on **empty** cells only (``train/lm_loss``).
 - **Training length**: smoke-friendly defaults (`--tiny`); full **60k epochs**, batch **768**, and LR warmup are documented but not wired as defaults.
 
 ## Layout
@@ -111,15 +111,21 @@ uv run pytest
 
 ## Experiment tracking
 
-Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` (and project/entity) are set in `.env`:
+Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` (and project/entity) are set in `.env`. Primary keys match the paper project (`Sudoku-extreme-1k-aug-1000-ACT-torch`):
 
-- Per-step: `train/loss` (deep-supervision sum per batch)
-- Per-epoch: `train/epoch_loss`, `train/epoch_cell_accuracy`, `train/epoch_puzzle_accuracy` (EMA inference on the train split)
-- Per-epoch validation (unless `--no-validate`): `val/cell_accuracy`, `val/puzzle_accuracy` on a deterministic holdout from the HF train head (`val_size`, default 500)
-- `checkpoints/checkpoint.last.pt` rewritten after **each** epoch
-- Final checkpoint uploaded as a W&B model artifact when a run is active
+| Key | Meaning |
+| --- | --- |
+| `num_params` | Parameter count (logged once at step 0) |
+| `train/lm_loss` | Masked cross-entropy on empty cells |
+| `train/q_halt_loss` | Halt-head BCE (target = all empty cells correct) |
+| `train/q_halt_accuracy` | Halt decision matches sequence correctness |
+| `train/exact_accuracy` | Fraction of newly halted examples fully correct |
+| `train/steps` | Mean ACT / supervision step index at halt |
+| `train/lr` | Learning rate |
 
-Eval and epoch accuracies use EMA shadow weights (same as `eval` checkpoint loading). Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
+Extras (unless `--no-validate`): `val/cell_accuracy`, `val/puzzle_accuracy` on a deterministic HF-train holdout (`val_size`, default 500) via EMA inference.
+
+`checkpoints/checkpoint.last.pt` is rewritten after **each** epoch; the final checkpoint is uploaded as a W&B model artifact when a run is active. Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
 
 ## References
 

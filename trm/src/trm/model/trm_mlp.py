@@ -1,4 +1,4 @@
-"""TRM-MLP for 9×9 Sudoku (shared net, latent recursion, deep supervision)."""
+"""TRM-MLP for 9x9 Sudoku (shared net, latent recursion, deep supervision)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ class TRMMLP(nn.Module):
     """
 
     def __init__(self, cfg: ModelConfig) -> None:
+        """Build embeddings, MLP-Mixer backbone, LM head, and halt Q-head."""
         super().__init__()
         self.cfg = cfg
         self.puzzle_embed = nn.Embedding(cfg.n_digits, cfg.d_model)
@@ -34,6 +35,11 @@ class TRMMLP(nn.Module):
         self.y_norm = nn.LayerNorm(cfg.d_model)
         self.z_norm = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.n_classes)
+        # Halt Q-head (paper ACT, no continue): BCE target = sequence fully correct.
+        self.q_head = nn.Linear(cfg.d_model, 1)
+        with torch.no_grad():
+            self.q_head.weight.zero_()
+            self.q_head.bias.fill_(-5.0)
         self.y_init = nn.Parameter(torch.zeros(1, SEQ_LEN, cfg.d_model))
         self.z_init = nn.Parameter(torch.zeros(1, SEQ_LEN, cfg.d_model))
 
@@ -49,12 +55,14 @@ class TRMMLP(nn.Module):
         return self.backbone(y + z)
 
     def latent_recursion(self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply ``n`` latent ``z`` updates then one ``y`` refine."""
         for _ in range(self.cfg.n_latent):
             z = self._net_latent(x, y, z)
         y = self._net_refine(y, z)
         return y, z
 
     def deep_recursion(self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run ``T-1`` no-grad recursions then one with grad; detach carry."""
         cfg = self.cfg
         if cfg.T > 1:
             with torch.no_grad():
@@ -68,9 +76,28 @@ class TRMMLP(nn.Module):
         return self.head(self.out_norm(y))
 
     def initial_state(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expand learned ``y`` / ``z`` initial states for a batch."""
         y = self.y_init.expand(batch_size, -1, -1).to(device)
         z = self.z_init.expand(batch_size, -1, -1).to(device)
         return y, z
+
+    def supervision_step(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        One deep-supervision / ACT micro-step.
+
+        Returns ``(y, z, logits, q_halt_logits)`` where ``q_halt_logits`` is ``(B,)``.
+        """
+        y, z = self.deep_recursion(x, y, z)
+        y = self.y_norm(y)
+        z = self.z_norm(z)
+        logits = self.logits_from_y(y)
+        q_halt = self.q_head(y.mean(dim=1)).squeeze(-1)
+        return y, z, logits, q_halt
 
     def forward_supervised(
         self,
@@ -79,17 +106,15 @@ class TRMMLP(nn.Module):
         """
         Deep supervision forward for training.
 
-        Returns final ``(y, z)`` and a list of logits after each supervision step.
+        Returns final ``y`` and a list of logits after each supervision step.
         """
         x = self.embed_puzzle(puzzle)
         batch_size = puzzle.shape[0]
         y, z = self.initial_state(batch_size, puzzle.device)
         step_logits: list[torch.Tensor] = []
         for _ in range(self.cfg.max_supervision_steps):
-            y, z = self.deep_recursion(x, y, z)
-            y = self.y_norm(y)
-            z = self.z_norm(z)
-            step_logits.append(self.logits_from_y(y))
+            y, z, logits, _q_halt = self.supervision_step(x, y, z)
+            step_logits.append(logits)
         return y, step_logits
 
     def forward_inference(self, puzzle: torch.Tensor) -> torch.Tensor:
@@ -98,7 +123,5 @@ class TRMMLP(nn.Module):
         y, z = self.initial_state(puzzle.shape[0], puzzle.device)
         with torch.no_grad():
             for _ in range(self.cfg.max_supervision_steps):
-                y, z = self.deep_recursion(x, y, z)
-                y = self.y_norm(y)
-                z = self.z_norm(z)
-        return self.logits_from_y(y)
+                y, z, logits, _q_halt = self.supervision_step(x, y, z)
+        return logits

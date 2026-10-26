@@ -1,6 +1,9 @@
 """Experiment tracking integration with Weights & Biases."""
 
+from __future__ import annotations
+
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +18,18 @@ try:
     _wandb_available = True
 except ImportError:
     pass
+
+
+@dataclass(frozen=True)
+class TrainStepMetrics:
+    """Paper-aligned per-batch train metrics (upstream TRM W&B keys)."""
+
+    lm_loss: float
+    q_halt_loss: float
+    exact_accuracy: float
+    q_halt_accuracy: float
+    steps: float
+    lr: float
 
 
 def init_wandb(app_cfg: AppConfig, run_name: str | None = None, extra_config: dict | None = None) -> bool:
@@ -47,39 +62,33 @@ def init_wandb(app_cfg: AppConfig, run_name: str | None = None, extra_config: di
     return True
 
 
-def log_train_step(loss: float, step: int) -> None:
-    """Log per-batch training loss to W&B."""
+def log_num_params(num_params: int) -> None:
+    """Log parameter count at step 0 (paper ``num_params`` chart)."""
     if not _wandb_available or wandb.run is None:
         return
+    wandb.log({'num_params': num_params}, step=0)
 
-    wandb.log({'train/loss': loss}, step=step)
 
-
-def log_epoch(
-    epoch: int,
-    epoch_loss: float,
-    step: int,
-    *,
-    cell_accuracy: float,
-    puzzle_accuracy: float,
-) -> None:
-    """Log epoch-level training loss and EMA train accuracies to W&B."""
+def log_train_step(metrics: TrainStepMetrics, step: int) -> None:
+    """Log per-batch paper train metrics to W&B."""
     if not _wandb_available or wandb.run is None:
         return
 
     wandb.log(
         {
-            'train/epoch_loss': epoch_loss,
-            'train/epoch': epoch,
-            'train/epoch_cell_accuracy': cell_accuracy,
-            'train/epoch_puzzle_accuracy': puzzle_accuracy,
+            'train/lm_loss': metrics.lm_loss,
+            'train/q_halt_loss': metrics.q_halt_loss,
+            'train/exact_accuracy': metrics.exact_accuracy,
+            'train/q_halt_accuracy': metrics.q_halt_accuracy,
+            'train/steps': metrics.steps,
+            'train/lr': metrics.lr,
         },
         step=step,
     )
 
 
 def log_validation(cell_accuracy: float, puzzle_accuracy: float, step: int) -> None:
-    """Log validation accuracy metrics to W&B."""
+    """Log validation accuracy extras (not in the paper panel set)."""
     if not _wandb_available or wandb.run is None:
         return
 
