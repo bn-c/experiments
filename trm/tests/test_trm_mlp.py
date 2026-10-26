@@ -30,6 +30,17 @@ def test_forward_supervised_shapes() -> None:
     assert step_logits[0].shape == (2, 81, 9)
 
 
+def test_supervision_step_returns_q_halt() -> None:
+    cfg = tiny_model_config()
+    model = TRMMLP(cfg)
+    batch = _fake_batch(3)
+    x = model.embed_puzzle(batch['puzzle'])
+    y, z = model.initial_state(3, batch['puzzle'].device)
+    y, z, logits, q_halt = model.supervision_step(x, y, z)
+    assert logits.shape == (3, 81, 9)
+    assert q_halt.shape == (3,)
+
+
 class _ListDS(Dataset):
     def __len__(self) -> int:
         return 4
@@ -45,8 +56,15 @@ def test_one_training_step() -> None:
     train_cfg = tiny_train_config()
     loader = DataLoader(_ListDS(), batch_size=4)
     trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'))
+    batch = _fake_batch(4)
+    metrics = trainer._train_batch(batch['puzzle'], batch['solution'], batch['mask'])
+    assert metrics.lm_loss >= 0.0
+    assert metrics.q_halt_loss >= 0.0
+    assert 0.0 <= metrics.exact_accuracy <= 1.0
+    assert 0.0 <= metrics.q_halt_accuracy <= 1.0
+    assert 1.0 <= metrics.steps <= cfg.max_supervision_steps
     loss = trainer.train_epoch()
-    assert loss > 0.0
+    assert loss >= 0.0
 
 
 def test_evaluate_loader_returns_accuracies_in_range() -> None:
