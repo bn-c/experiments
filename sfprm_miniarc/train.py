@@ -278,6 +278,11 @@ def train(args: argparse.Namespace) -> None:
         args.wd_puzzle,
     )
     ema = EMAModel(model, decay=args.ema_decay) if args.ema_decay > 0 else None
+    # Compile after EMA deepcopy so the shadow stays eager. Same hot path as
+    # scripts/bench_compile.py (paper SFPRM.step); solver_step / run_segment call it.
+    if args.compile:
+        model.step = torch.compile(model.step, mode="reduce-overhead")  # type: ignore[method-assign]
+        print("torch.compile: model.step (mode=reduce-overhead)")
 
     solver_cfg = SolverConfig(
         patience=args.patience,
@@ -474,7 +479,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--data_dir", type=str, default=str(ROOT / "data" / "mini_arc"))
     p.add_argument("--out_dir", type=str, default=str(ROOT / "checkpoints"))
     p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--compile", action="store_true")
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="wrap model.step with torch.compile(mode=reduce-overhead); default off",
+    )
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=500)
     p.add_argument("--ckpt_every", type=int, default=1000)

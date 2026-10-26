@@ -63,6 +63,7 @@ cd sfprm_miniarc
 pip install -r requirements.txt
 ./run.sh --smoke          # CPU-friendly
 ./run.sh                  # full 12k (needs ≥16GB GPU)
+# optional: python train.py --compile  # torch.compile on model.step (default off)
 ```
 
 Eval:
