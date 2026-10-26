@@ -61,7 +61,8 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
             _, step_logits = self.model.forward_supervised(puzzle)
-            loss = sum(masked_cross_entropy(logits, solution, mask) for logits in step_logits)
+            step_losses = [masked_cross_entropy(logits, solution, mask) for logits in step_logits]
+            loss = torch.stack(step_losses).sum()
             loss.backward()
             self.optimizer.step()
             self.ema.update(self.model)
