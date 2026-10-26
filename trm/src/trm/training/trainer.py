@@ -79,13 +79,13 @@ class Trainer:
             run_name='trm-sudoku',
             extra_config={**self.model_cfg.model_dump(), **self.train_cfg.model_dump()},
         )
+        checkpoint_path = self.train_cfg.checkpoint_dir / 'checkpoint.last.pt'
         try:
             for epoch in range(self.train_cfg.epochs):
                 avg_loss = self.train_epoch()
                 log_epoch(epoch + 1, avg_loss, self.global_step)
                 logger.info('Epoch %d/%d — loss %.4f', epoch + 1, self.train_cfg.epochs, avg_loss)
-            checkpoint_path = self.train_cfg.checkpoint_dir / 'checkpoint.last.pt'
-            self.save_checkpoint(checkpoint_path)
+                self.save_checkpoint(checkpoint_path)
             upload_checkpoint_to_wandb(checkpoint_path)
         finally:
             finish_wandb()

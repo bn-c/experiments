@@ -1,7 +1,7 @@
 """Experiment tracking integration with Weights & Biases."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from trm.config import AppConfig
@@ -34,7 +34,7 @@ def init_wandb(app_cfg: AppConfig, run_name: str | None = None, extra_config: di
         logger.info('W&B not configured, skipping initialization')
         return False
 
-    timestamp = datetime.now(tz=timezone.utc).strftime('%Y%m%d-%H%M%S')
+    timestamp = datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')
     name = f'{run_name}-{timestamp}' if run_name else timestamp
 
     wandb.login(key=app_cfg.wandb_api_key)

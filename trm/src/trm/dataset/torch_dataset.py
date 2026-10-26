@@ -16,6 +16,7 @@ class SudokuTorchDataset(Dataset):
         puzzle: (81,) int64 — digits 0-9 (0 = empty)
         solution: (81,) int64 — digits 1-9
         mask: (81,) float — 1 on empty cells (loss applied), 0 on givens
+
     """
 
     def __init__(self, df: pd.DataFrame) -> None:

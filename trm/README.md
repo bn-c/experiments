@@ -54,7 +54,7 @@ uv sync --extra rocm
 
 Optional `.env` variables (copy from `.env.example`):
 
-- `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` — experiment tracking (same names as [`../enso/`](../enso/))
+- `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` — experiment tracking (env var **names** match [`../enso/`](../enso/), but TRM defaults to W&B project **`trm-sudoku`**, not the Enso project)
 
 ## Smoke commands
 
@@ -86,6 +86,26 @@ Override paper recursion hyperparameters:
 uv run python -m trm.main train --n 6 --T 3 --max-steps 16 --train-size 1000
 ```
 
+## Desk pilot (ROCm, paper arch)
+
+On the AMD desk box, install ROCm PyTorch wheels then run a **real** pilot (1K train rows, paper recursion defaults, 5K eval samples). Training writes `checkpoints/checkpoint.last.pt` **after every epoch** (safe for `--epochs 1` chunks that you chain manually).
+
+```bash
+cd trm
+uv sync --extra rocm
+cp .env.example .env   # set WANDB_API_KEY; WANDB_PROJECT=trm-sudoku (default)
+
+# Train: 1K HF train rows, paper defaults (n=6, T=3, N_sup=16), 1 epoch per invocation
+uv run python -m trm.main train --train-size 1000 --epochs 1
+
+# Eval: 5K test puzzles (EMA weights from checkpoint)
+uv run python -m trm.main eval \
+  --checkpoint checkpoints/checkpoint.last.pt \
+  --n-samples 5000
+```
+
+Each `train --epochs 1` invocation still refreshes `checkpoints/checkpoint.last.pt` when that epoch completes.
+
 ## Tests
 
 ```bash
@@ -95,11 +115,13 @@ uv run pytest
 
 ## Experiment tracking
 
-Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` (and project/entity) are set in `.env`:
+Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` is set in `.env`:
 
+- Default project: **`trm-sudoku`** (`WANDB_PROJECT` overrides; keep TRM separate from Enso desk runs)
 - Per-step: `train/loss` (deep-supervision sum per batch)
 - Per-epoch: `train/epoch_loss`
-- Final checkpoint uploaded as a W&B model artifact when a run is active
+- `checkpoints/checkpoint.last.pt` updated locally after **each** training epoch
+- Latest checkpoint uploaded as a W&B model artifact when the run finishes
 
 Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
 
