@@ -10,7 +10,7 @@ if [[ "${1:-}" == "--smoke" ]]; then
   shift
 fi
 
-echo "[1/3] Downloading Mini-ARC tasks..."
+echo "[1/3] Downloading Mini-ARC tasks from Hugging Face (andrewcropper/ilp-datasets mini-arc/)..."
 python data/download_miniarc.py
 
 if [[ "$SMOKE" -eq 1 ]]; then
