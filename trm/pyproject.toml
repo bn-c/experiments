@@ -1,0 +1,66 @@
+[project]
+name = "trm-sudoku"
+version = "0.1.0"
+description = "Tiny Recursive Model (TRM) Sudoku experiment on sapientinc/sudoku-extreme"
+readme = "README.md"
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    "datasets>=3.0.0",
+    "huggingface-hub>=0.26.0",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "tqdm>=4.66.0",
+    "torch>=2.4.0",
+]
+
+[project.optional-dependencies]
+# AMD ROCm nightly PyTorch; use `uv sync --extra rocm` on an AMD box.
+rocm = [
+    "pytorch-triton-rocm",
+]
+
+[dependency-groups]
+dev = [
+    "pytest >= 9.0.1",
+    "pytest-mock >= 3.15.1",
+    "ruff >= 0.14.6",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "trm"
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm-nightly" }
+pytorch-triton-rocm = { index = "pytorch-rocm-nightly" }
+
+[tool.uv]
+prerelease = "allow"
+
+[[tool.uv.index]]
+name = "pytorch-rocm-nightly"
+url = "https://download.pytorch.org/whl/nightly/rocm6.4"
+explicit = true
+
+[tool.ruff]
+fix = true
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["D", "RUF", "PT", "TID", "I", "PL"]
+ignore = ["D203", "D212"]
+per-file-ignores = { "tests/**/*.py" = ["D", "PLR2004"], "*_test.py" = ["D", "PLR2004"] }
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--maxfail=3"]
