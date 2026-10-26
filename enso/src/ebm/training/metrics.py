@@ -50,6 +50,17 @@ def init_wandb(app_cfg: Config, run_name: str | None = None, extra_config: dict 
     return True
 
 
+def format_train_postfix(loss_out: LossOutput) -> dict[str, str]:
+    """Short loss-component strings for tqdm batch postfix."""
+    return {
+        'loss': f'{loss_out.total.item():.4f}',
+        'energy': f'{loss_out.energy.item():.4f}',
+        'vicreg': f'{loss_out.vicreg.item():.4f}',
+        'decode': f'{loss_out.decode.item():.4f}',
+        'constraint': f'{loss_out.constraint.item():.4f}',
+    }
+
+
 def log_train_step(loss_out: LossOutput, lr: float, ema_momentum: float, step: int) -> None:
     """
     Log training step metrics to W&B.
