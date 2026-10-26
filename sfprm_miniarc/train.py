@@ -100,27 +100,43 @@ def maybe_init_wandb(args: argparse.Namespace, num_params: int) -> bool:
 
 
 @torch.no_grad()
-def eval_pass_at_1(
+def eval_metrics(
     model: SFPRM,
     cache: MiniARCCache,
     *,
     epsilon: float,
     max_loops: int,
     device: torch.device,
-) -> tuple[float, float]:
-    """Chordal-halting Pass@1 and mean halt steps over an (unaugmented) cache."""
+    bptt_k: int,
+) -> dict[str, float]:
+    """Unaugmented Mini-ARC eval: chordal-halting Pass@1 + fixed-k CE loss.
+
+    Returns keys suitable for ``val/*`` (and aliased ``eval/*``) W&B logging.
+    """
     model.eval()
     amp_device = "cuda" if device.type == "cuda" else "cpu"
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    use_amp = device.type == "cuda"
     hits = 0
     halt_sum = 0
+    cell_correct = 0
+    cell_total = 0
+    loss_sum = 0.0
     n = len(cache)
     for i in range(n):
         x = cache.tokens[i : i + 1]
         y = cache.targets[i : i + 1]
         mask = cache.query_mask[i : i + 1]
-        with torch.autocast(device_type=amp_device, dtype=amp_dtype, enabled=device.type == "cuda"):
+        with torch.autocast(device_type=amp_device, dtype=amp_dtype, enabled=use_amp):
             z_input = model.get_input_embedding(x)
+
+            # Fixed-k loss (same unroll depth as train BPTT).
+            z_loss = z_input.clone()
+            for _ in range(bptt_k):
+                z_loss = model.step(z_loss, z_input)
+            loss_sum += float(F.cross_entropy(model.head(z_loss[mask]), y[mask]).item())
+
+            # Adaptive chordal halt → Pass@1 / cell acc / halt depth.
             z = z_input.clone()
             used = max_loops
             for step in range(max_loops):
@@ -132,10 +148,40 @@ def eval_pass_at_1(
                     break
             logits = model.head(z[mask])
             pred = logits.argmax(dim=-1)
-            exact = bool((pred == y[mask]).all().item())
+            tgt = y[mask]
+            exact = bool((pred == tgt).all().item())
+            cell_correct += int((pred == tgt).sum().item())
+            cell_total += int(tgt.numel())
         hits += int(exact)
         halt_sum += used
-    return hits / max(n, 1), halt_sum / max(n, 1)
+    denom = max(n, 1)
+    return {
+        "pass_at_1": hits / denom,
+        "mean_halt_steps": halt_sum / denom,
+        "cell_accuracy": cell_correct / max(cell_total, 1),
+        "loss": loss_sum / denom,
+    }
+
+
+@torch.no_grad()
+def eval_pass_at_1(
+    model: SFPRM,
+    cache: MiniARCCache,
+    *,
+    epsilon: float,
+    max_loops: int,
+    device: torch.device,
+) -> tuple[float, float]:
+    """Backward-compatible wrapper → (pass_at_1, mean_halt_steps)."""
+    m = eval_metrics(
+        model,
+        cache,
+        epsilon=epsilon,
+        max_loops=max_loops,
+        device=device,
+        bptt_k=6,
+    )
+    return m["pass_at_1"], m["mean_halt_steps"]
 
 
 def train(args: argparse.Namespace) -> None:
@@ -233,16 +279,33 @@ def train(args: argparse.Namespace) -> None:
 
         do_eval = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.steps)
         if do_eval:
-            pas, mean_halt = eval_pass_at_1(
+            metrics = eval_metrics(
                 model,
                 eval_cache,
                 epsilon=args.epsilon,
                 max_loops=args.max_loops,
                 device=device,
+                bptt_k=args.bptt_k,
             )
-            print(f"\n[step {step}] eval Pass@1={pas:.4f} mean_halt={mean_halt:.1f}")
+            pas = metrics["pass_at_1"]
+            mean_halt = metrics["mean_halt_steps"]
+            print(
+                f"\n[step {step}] val Pass@1={pas:.4f} cell={metrics['cell_accuracy']:.4f} "
+                f"loss={metrics['loss']:.4f} mean_halt={mean_halt:.1f}"
+            )
             if wandb_on:
-                wandb.log({"eval/pass_at_1": pas, "eval/mean_halt_steps": mean_halt}, step=step)
+                # Primary TRM-style val/* panel; keep eval/* aliases for older dashboards.
+                wandb.log(
+                    {
+                        "val/pass_at_1": pas,
+                        "val/cell_accuracy": metrics["cell_accuracy"],
+                        "val/loss": metrics["loss"],
+                        "val/mean_halt_steps": mean_halt,
+                        "eval/pass_at_1": pas,
+                        "eval/mean_halt_steps": mean_halt,
+                    },
+                    step=step,
+                )
             if pas >= best_pass:
                 best_pass = pas
                 torch.save(
