@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import torch
 
 from trm.config import ModelConfig, TrainConfig, tiny_model_config, tiny_train_config
@@ -53,3 +55,31 @@ def test_masked_loss_finite() -> None:
     _, logits = model.forward_supervised(batch['puzzle'])
     loss = masked_cross_entropy(logits[0], batch['solution'], batch['mask'])
     assert torch.isfinite(loss)
+
+
+def test_train_saves_checkpoint_each_epoch(tmp_path, caplog) -> None:
+    import logging
+    from torch.utils.data import DataLoader, Dataset
+
+    class _ListDS(Dataset):
+        def __len__(self) -> int:
+            return 4
+
+        def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+            batch = _fake_batch(1)
+            return {k: v[0] for k, v in batch.items()}
+
+    caplog.set_level(logging.INFO, logger='trm.training.trainer')
+    cfg = tiny_model_config()
+    model = TRMMLP(cfg)
+    train_cfg = tiny_train_config().model_copy(update={'epochs': 2, 'checkpoint_dir': tmp_path})
+    loader = DataLoader(_ListDS(), batch_size=4)
+    trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'))
+
+    with patch('trm.training.trainer.init_wandb', return_value=False):
+        with patch('trm.training.trainer.finish_wandb'):
+            trainer.train()
+
+    saves = [r.message for r in caplog.records if r.message.startswith('Saved checkpoint')]
+    assert len(saves) == 2
+    assert (tmp_path / 'checkpoint.last.pt').is_file()

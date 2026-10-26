@@ -54,7 +54,7 @@ uv sync --extra rocm
 
 Optional `.env` variables (copy from `.env.example`):
 
-- `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` — experiment tracking (same names as [`../enso/`](../enso/))
+- `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` — experiment tracking (TRM defaults `WANDB_PROJECT=trm-sudoku`, separate from [`../enso/`](../enso/))
 
 ## Smoke commands
 
@@ -70,6 +70,22 @@ uv run python -m trm.main train --tiny
 ```bash
 cd trm
 uv run python -m trm.main train --tiny
+```
+
+**ROCm desk pilot** (1K train rows, 5K test eval — paper-scale train pool, moderate eval):
+
+```bash
+cd trm
+uv sync --extra rocm
+./scripts/desk-pilot.sh
+```
+
+**VRAM batch probe** (synthetic forward+backward; requires CUDA):
+
+```bash
+cd trm
+uv run python scripts/vram-probe.py
+uv run python scripts/vram-probe.py --tiny   # small model for smoke
 ```
 
 **Eval** on HF `test` split (requires a checkpoint from `train`):
@@ -99,6 +115,7 @@ Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_
 
 - Per-step: `train/loss` (deep-supervision sum per batch)
 - Per-epoch: `train/epoch_loss`
+- `checkpoints/checkpoint.last.pt` rewritten after **each** epoch
 - Final checkpoint uploaded as a W&B model artifact when a run is active
 
 Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.

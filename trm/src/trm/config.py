@@ -14,7 +14,10 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env')
 
     wandb_api_key: str | None = Field(description='The API key for the Weights and Biases API.', default=None)
-    wandb_project: str | None = Field(description='The project name for the Weights and Biases API.', default=None)
+    wandb_project: str | None = Field(
+        description='The project name for the Weights and Biases API.',
+        default='trm-sudoku',
+    )
     wandb_entity: str | None = Field(description='The entity name for the Weights and Biases API.', default=None)
 
 
