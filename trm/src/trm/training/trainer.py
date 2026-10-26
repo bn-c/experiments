@@ -9,10 +9,17 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from trm.config import ModelConfig, TrainConfig
+from trm.config import AppConfig, ModelConfig, TrainConfig
 from trm.model.ema import EMAModel
 from trm.model.trm_mlp import TRMMLP
 from trm.training.loss import masked_cross_entropy
+from trm.training.metrics import (
+    finish_wandb,
+    init_wandb,
+    log_epoch,
+    log_train_step,
+    upload_checkpoint_to_wandb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +40,8 @@ class Trainer:
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
         self.device = device
+        self.app_cfg = AppConfig()
+        self.global_step = 0
         self.ema = EMAModel(self.model, decay=train_cfg.ema_decay)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -57,15 +66,29 @@ class Trainer:
             self.optimizer.step()
             self.ema.update(self.model)
 
-            total_loss += float(loss.item())
+            batch_loss = float(loss.item())
+            log_train_step(batch_loss, self.global_step)
+            self.global_step += 1
+            total_loss += batch_loss
             n_batches += 1
         return total_loss / max(n_batches, 1)
 
     def train(self) -> None:
-        for epoch in range(self.train_cfg.epochs):
-            avg_loss = self.train_epoch()
-            logger.info('Epoch %d/%d — loss %.4f', epoch + 1, self.train_cfg.epochs, avg_loss)
-        self.save_checkpoint(self.train_cfg.checkpoint_dir / 'checkpoint.last.pt')
+        init_wandb(
+            self.app_cfg,
+            run_name='trm-sudoku',
+            extra_config={**self.model_cfg.model_dump(), **self.train_cfg.model_dump()},
+        )
+        try:
+            for epoch in range(self.train_cfg.epochs):
+                avg_loss = self.train_epoch()
+                log_epoch(epoch + 1, avg_loss, self.global_step)
+                logger.info('Epoch %d/%d — loss %.4f', epoch + 1, self.train_cfg.epochs, avg_loss)
+            checkpoint_path = self.train_cfg.checkpoint_dir / 'checkpoint.last.pt'
+            self.save_checkpoint(checkpoint_path)
+            upload_checkpoint_to_wandb(checkpoint_path)
+        finally:
+            finish_wandb()
 
     def save_checkpoint(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -52,6 +52,10 @@ uv sync
 uv sync --extra rocm
 ```
 
+Optional `.env` variables (copy from `.env.example`):
+
+- `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` — experiment tracking (same names as [`../enso/`](../enso/))
+
 ## Smoke commands
 
 **CPU smoke train** (tiny model, 32 puzzles, 1 epoch):
@@ -88,6 +92,16 @@ uv run python -m trm.main train --n 6 --T 3 --max-steps 16 --train-size 1000
 cd trm
 uv run pytest
 ```
+
+## Experiment tracking
+
+Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` (and project/entity) are set in `.env`:
+
+- Per-step: `train/loss` (deep-supervision sum per batch)
+- Per-epoch: `train/epoch_loss`
+- Final checkpoint uploaded as a W&B model artifact when a run is active
+
+Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
 
 ## References
 
