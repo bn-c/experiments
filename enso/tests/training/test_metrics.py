@@ -1,6 +1,12 @@
 import torch
 
-from ebm.training.metrics import compute_cell_accuracy, compute_puzzle_accuracy, compute_z_variance
+from ebm.training.losses import LossOutput
+from ebm.training.metrics import (
+    compute_cell_accuracy,
+    compute_puzzle_accuracy,
+    compute_z_variance,
+    format_train_postfix,
+)
 
 
 def test_cell_accuracy_perfect():
@@ -46,6 +52,23 @@ def test_z_variance_positive():
     z = torch.randn(32, 64)
     var = compute_z_variance(z)
     assert var > 0
+
+
+def test_format_train_postfix():
+    loss_out = LossOutput(
+        total=torch.tensor(35.8327),
+        energy=torch.tensor(1.2345),
+        vicreg=torch.tensor(24.5),
+        decode=torch.tensor(2.1),
+        constraint=torch.tensor(0.0567),
+    )
+    assert format_train_postfix(loss_out) == {
+        'loss': '35.8327',
+        'energy': '1.2345',
+        'vicreg': '24.5000',
+        'decode': '2.1000',
+        'constraint': '0.0567',
+    }
 
 
 def test_z_variance_collapsed():
