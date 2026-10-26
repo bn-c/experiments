@@ -2,9 +2,8 @@
 """Truncated BPTT training for SFPRM on Mini-ARC (paper-faithful solver + nGPT).
 
 Defaults follow arXiv:2610.25646 Appendix B / Table 3 (Mini-ARC), except desk
-keeps steps=12_000 and aug count D₄×8 (=64). Sequences default to paper
-demo-pair seq-25 (``--pack_mode demo_pair``). Legacy packed demos+query ≤128:
-``--pack_mode packed --max_seq_len 128``. Dims scaled for 1×16GB GPU.
+keeps steps=12_000 and aug count D₄×8 (=64). Sequences are paper demo-pair
+seq-25. Dims scaled for 1×16GB GPU.
 """
 
 from __future__ import annotations
@@ -25,11 +24,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.dataset import (  # noqa: E402
-    DEFAULT_PACK_MODE,
+    PAPER_SEQ_LEN,
     VOCAB_SIZE,
     MiniARCCache,
     build_cache,
-    default_max_seq_len,
     make_train_indices,
 )
 from models.ema import EMAModel  # noqa: E402
@@ -243,7 +241,6 @@ def train(args: argparse.Namespace) -> None:
         data_dir,
         device=device,
         max_seq_len=args.max_seq_len,
-        pack_mode=args.pack_mode,
         augment=True,
         n_color_perms=args.n_color_perms,
         seed=args.seed,
@@ -253,7 +250,6 @@ def train(args: argparse.Namespace) -> None:
         data_dir,
         device=device,
         max_seq_len=args.max_seq_len,
-        pack_mode=args.pack_mode,
         augment=False,
         seed=args.seed,
         max_tasks=args.max_tasks,
@@ -261,7 +257,7 @@ def train(args: argparse.Namespace) -> None:
     n_puzzles = int(train_cache.puzzle_ids.max().item()) + 1 if len(train_cache) else 1
     print(
         f"Train cache: {len(train_cache)} samples on {device}; eval tasks: {len(eval_cache)}; "
-        f"puzzles={n_puzzles}; pack_mode={args.pack_mode}; max_seq_len={args.max_seq_len}"
+        f"puzzles={n_puzzles}; max_seq_len={args.max_seq_len}"
     )
 
     model = SFPRM(
@@ -488,20 +484,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--n_layers", type=int, default=DEFAULT_N_LAYERS)
     p.add_argument("--puzzle_emb_len", type=int, default=1)
     p.add_argument(
-        "--pack_mode",
-        type=str,
-        choices=["demo_pair", "packed"],
-        default=DEFAULT_PACK_MODE,
-        help=(
-            "demo_pair (paper): 25-token I→O grids, train on demos / eval on test. "
-            "packed (legacy EX-33): demos+query ≤max_seq_len (use --max_seq_len 128)."
-        ),
-    )
-    p.add_argument(
         "--max_seq_len",
         type=int,
-        default=None,
-        help="Token length (default: 25 for demo_pair, 128 for packed)",
+        default=PAPER_SEQ_LEN,
+        help="Token length (paper Mini-ARC demo-pair = 25)",
     )
     p.add_argument("--n_color_perms", type=int, default=8, help="D₄×this = 64 augs/task (desk)")
     p.add_argument("--seed", type=int, default=0)
@@ -533,8 +519,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.epsilon is not None:
         args.tau = args.epsilon
-    if args.max_seq_len is None:
-        args.max_seq_len = default_max_seq_len(args.pack_mode)
     return args
 
 

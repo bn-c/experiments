@@ -163,20 +163,16 @@ def test_train_compile_flag_default_off():
     assert train_mod.parse_args(["--compile"]).compile is True
 
 
-def test_train_pack_mode_defaults_paper_seq25():
+def test_train_defaults_paper_seq25():
     import train as train_mod  # noqa: E402
 
     args = train_mod.parse_args([])
-    assert args.pack_mode == "demo_pair"
     assert args.max_seq_len == 25
-    packed = train_mod.parse_args(["--pack_mode", "packed"])
-    assert packed.pack_mode == "packed"
-    assert packed.max_seq_len == 128
 
 
-def test_pack_demo_pair_and_legacy_packed():
+def test_pack_demo_pair_seq25():
     import numpy as np
-    from data.dataset import CELLS, PAD_ID, pack_demo_pair, pack_sequence
+    from data.dataset import CELLS, pack_demo_pair
 
     grid_in = np.arange(CELLS, dtype=np.int64).reshape(5, 5) % 10
     grid_out = (grid_in + 1) % 10
@@ -186,14 +182,8 @@ def test_pack_demo_pair_and_legacy_packed():
     assert np.array_equal(tok, grid_in.reshape(-1))
     assert np.array_equal(tgt, grid_out.reshape(-1))
 
-    demos = [(grid_in, grid_out)]
-    tok_p, tgt_p, mask_p = pack_sequence(demos, grid_in, grid_out, max_seq_len=128)
-    assert tok_p.shape == (128,)
-    assert int(mask_p.sum()) == CELLS
-    assert int((tok_p == PAD_ID).sum()) == 128 - 3 * CELLS  # 1 demo in|out + query
 
-
-def test_build_cache_demo_pair_vs_packed(tmp_path):
+def test_build_cache_demo_pair(tmp_path):
     import json
 
     import numpy as np
@@ -222,36 +212,48 @@ def test_build_cache_demo_pair_vs_packed(tmp_path):
     path.write_text(json.dumps(task))
 
     device = torch.device("cpu")
-    # Train demo_pair: 2 demos × 8 D4 × 1 color = 16 (n_color_perms=1 → identity only)
+    # Train: 2 demos × 8 D4 × 1 color = 16
     train_dp = build_cache(
         tmp_path,
         device=device,
-        pack_mode="demo_pair",
         augment=True,
         n_color_perms=1,
         seed=0,
     )
     assert train_dp.tokens.shape == (16, 25)
     assert bool(train_dp.query_mask.all())
-    # Eval demo_pair: one test row
-    eval_dp = build_cache(
-        tmp_path, device=device, pack_mode="demo_pair", augment=False, n_color_perms=1
-    )
+    # Eval: one test row
+    eval_dp = build_cache(tmp_path, device=device, augment=False, n_color_perms=1)
     assert eval_dp.tokens.shape == (1, 25)
     assert int(eval_dp.tokens[0, 0].item()) == 4
     assert int(eval_dp.targets[0, 0].item()) == 5
 
-    # Packed train: 1 sample per aug (8 D4 × 1 color)
-    train_pk = build_cache(
-        tmp_path,
-        device=device,
-        pack_mode="packed",
-        max_seq_len=128,
-        augment=True,
-        n_color_perms=1,
+
+def test_reject_packed_checkpoint_seqlen():
+    """EX-33 packed ckpts (max_seq_len=128) must not load under seq-25-only eval."""
+    import argparse
+
+    import torch
+    from evaluate import _build_model_from_ckpt
+
+    ckpt = {
+        "args": {"d_model": 32, "n_heads": 4, "d_ff": 64, "n_layers": 1, "max_seq_len": 128},
+        "model": {},
+    }
+    ns = argparse.Namespace(
+        d_model=32,
+        n_heads=4,
+        d_ff=64,
+        n_layers=1,
+        max_seq_len=25,
+        puzzle_emb_len=1,
+        use_ema=False,
     )
-    assert train_pk.tokens.shape == (8, 128)
-    assert int(train_pk.query_mask[0].sum().item()) == 25
+    try:
+        _build_model_from_ckpt(ckpt, ns, torch.device("cpu"))
+        raise AssertionError("expected ValueError for packed max_seq_len")
+    except ValueError as e:
+        assert "unsupported" in str(e).lower() or "seq-25" in str(e)
 
 
 def test_token_pad_mask_and_residual():

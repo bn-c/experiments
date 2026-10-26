@@ -20,14 +20,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.dataset import (  # noqa: E402
-    DEFAULT_PACK_MODE,
-    PACK_MODE_PACKED,
-    PAPER_SEQ_LEN,
-    VOCAB_SIZE,
-    build_cache,
-    default_max_seq_len,
-)
+from data.dataset import PAPER_SEQ_LEN, VOCAB_SIZE, build_cache  # noqa: E402
 from models.sfprm_core import (  # noqa: E402
     DEFAULT_D_FF,
     DEFAULT_D_MODEL,
@@ -127,12 +120,13 @@ def _build_model_from_ckpt(ckpt: dict, args: argparse.Namespace, device: torch.d
     n_layers = int(a.get("n_layers", args.n_layers))
     max_seq_len = int(a.get("max_seq_len", args.max_seq_len))
     puzzle_emb_len = int(a.get("puzzle_emb_len", args.puzzle_emb_len))
-    # Resolve packing from ckpt (old EX-33 packs had max_seq_len=128, no pack_mode key).
+    # EX-33 packed (len≤128) ckpts are unsupported — retrain under seq-25.
+    if max_seq_len != PAPER_SEQ_LEN:
+        raise ValueError(
+            f"checkpoint max_seq_len={max_seq_len} != paper seq-25; "
+            "packed EX-33 checkpoints are unsupported — retrain with demo-pair seq-25"
+        )
     args.max_seq_len = max_seq_len
-    if "pack_mode" in a:
-        args.pack_mode = a["pack_mode"]
-    elif max_seq_len > PAPER_SEQ_LEN:
-        args.pack_mode = PACK_MODE_PACKED
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     # Infer n_puzzles from puzzle_emb weight if present
     n_puzzles = 149
@@ -165,17 +159,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max_loops", type=int, default=200)
     p.add_argument("--gamma", type=float, default=0.9)
     p.add_argument(
-        "--pack_mode",
-        type=str,
-        choices=["demo_pair", "packed"],
-        default=DEFAULT_PACK_MODE,
-        help="Must match train packing. Legacy ckpts: --pack_mode packed --max_seq_len 128",
-    )
-    p.add_argument(
         "--max_seq_len",
         type=int,
-        default=None,
-        help="Token length (default: 25 for demo_pair, 128 for packed; overridden by ckpt args)",
+        default=PAPER_SEQ_LEN,
+        help="Token length (paper Mini-ARC = 25; overridden by ckpt args)",
     )
     p.add_argument("--d_model", type=int, default=DEFAULT_D_MODEL)
     p.add_argument("--n_heads", type=int, default=DEFAULT_N_HEADS)
@@ -195,20 +182,16 @@ def main(argv: list[str] | None = None) -> int:
         args.tau = args.epsilon
     if args.no_ema:
         args.use_ema = False
-    if args.max_seq_len is None:
-        args.max_seq_len = default_max_seq_len(args.pack_mode)
 
     device = resolve_device(args.device)
     use_amp = device.type == "cuda"
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model = _build_model_from_ckpt(ckpt, args, device)
-    # Prefer packing / seq len saved with the checkpoint (overrides CLI defaults).
     cache = build_cache(
         Path(args.data_dir),
         device=device,
         max_seq_len=args.max_seq_len,
-        pack_mode=args.pack_mode,
         augment=False,
         max_tasks=args.max_tasks,
     )

@@ -1,22 +1,14 @@
 """Mini-ARC ingestion, D₄ + color-perm augmentation, in-device tensor cache.
 
-Sequence modes
---------------
-``demo_pair`` (default, paper Mini-ARC App. B / Table 3)
-  One 5×5 input grid → predict the 5×5 output (``seq_len=25`` cell tokens +
-  puzzle emb). Train on the task's demonstration pairs; eval on the test pair.
-  Matches "528 demo pairs × augs" / "a puzzle is 25 cell tokens".
-
-``packed`` (legacy desk EX-33)
-  Concatenate up to ``max_demos`` demonstration pairs as
-  ``flatten(input) || flatten(output)``, then the query input grid; supervise
-  the query output at query-input positions. With ``max_seq_len=128`` this fits
-  2 demos + query (125 tokens), then PAD to 128.
+Paper Mini-ARC (App. B / Table 3): one 5×5 input grid → predict the 5×5 output
+(``seq_len=25`` cell tokens + puzzle emb). Train on the task's demonstration
+pairs; eval on the test pair. Matches "528 demo pairs × augs" / "a puzzle is
+25 cell tokens".
 
 PAD_ID = 10; SEP_ID = 11 reserved (vocab_size=12). Colors are tokens 0–9.
 
-Migration: old packed checkpoints / scripts need
-``--pack_mode packed --max_seq_len 128``. New defaults are paper ``demo_pair`` / 25.
+Note: pre-seq25 desk runs (EX-33) used packed demos+query ≤128. That path is
+gone; those checkpoints are unsupported — retrain with this formulation.
 """
 
 from __future__ import annotations
@@ -25,7 +17,6 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
@@ -38,15 +29,6 @@ SEP_ID = 11  # paper Mini-ARC vocab=12 (colors 0–9 + PAD + SEP)
 NUM_COLORS = 10  # 0–9; 0 is background (not permuted)
 VOCAB_SIZE = 12
 
-PackMode = Literal["demo_pair", "packed"]
-PACK_MODE_DEMO_PAIR: PackMode = "demo_pair"
-PACK_MODE_PACKED: PackMode = "packed"
-DEFAULT_PACK_MODE: PackMode = PACK_MODE_DEMO_PAIR
-
-
-def default_max_seq_len(pack_mode: PackMode) -> int:
-    return PAPER_SEQ_LEN if pack_mode == PACK_MODE_DEMO_PAIR else 128
-
 
 @dataclass
 class MiniARCCache:
@@ -57,7 +39,6 @@ class MiniARCCache:
     query_mask: torch.Tensor  # [N, L] bool
     puzzle_ids: torch.Tensor  # [N] long — integer task index for puzzle-emb
     task_ids: list[str]
-    pack_mode: PackMode = DEFAULT_PACK_MODE
 
     def __len__(self) -> int:
         return int(self.tokens.shape[0])
@@ -132,48 +113,6 @@ def pack_demo_pair(
     return tokens, targets, mask
 
 
-def pack_sequence(
-    demos: list[tuple[np.ndarray, np.ndarray]],
-    query_in: np.ndarray,
-    query_out: np.ndarray,
-    max_seq_len: int = 128,
-    max_demos: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Legacy desk packing: demos + query into fixed-length token / target / mask."""
-    # Reserve CELLS for query_in; each demo costs 2 * CELLS.
-    room = max_seq_len - CELLS
-    fit = max(0, room // (2 * CELLS))
-    if max_demos is not None:
-        fit = min(fit, max_demos)
-    demos = demos[:fit]
-
-    tokens: list[int] = []
-    for inp, out in demos:
-        tokens.extend(inp.reshape(-1).tolist())
-        tokens.extend(out.reshape(-1).tolist())
-    q_start = len(tokens)
-    tokens.extend(query_in.reshape(-1).tolist())
-    q_end = len(tokens)
-
-    if len(tokens) > max_seq_len:
-        raise ValueError(f"packed length {len(tokens)} > max_seq_len={max_seq_len}")
-
-    pad_n = max_seq_len - len(tokens)
-    tokens.extend([PAD_ID] * pad_n)
-
-    targets = np.full(max_seq_len, PAD_ID, dtype=np.int64)
-    targets[q_start:q_end] = query_out.reshape(-1)
-
-    mask = np.zeros(max_seq_len, dtype=bool)
-    mask[q_start:q_end] = True
-
-    return (
-        np.asarray(tokens, dtype=np.int64),
-        targets,
-        mask,
-    )
-
-
 def _transform_task(
     task: dict,
     d4_k: int,
@@ -194,8 +133,7 @@ def build_cache(
     data_dir: Path,
     *,
     device: torch.device,
-    max_seq_len: int | None = None,
-    pack_mode: PackMode = DEFAULT_PACK_MODE,
+    max_seq_len: int = PAPER_SEQ_LEN,
     augment: bool = True,
     n_color_perms: int = 8,
     seed: int = 0,
@@ -204,18 +142,10 @@ def build_cache(
     """
     Load Mini-ARC tasks and cache tensors on ``device``.
 
-    When ``augment`` is True: 8 D₄ × ``n_color_perms`` random color maps per task.
-    When False: one unaugmented sample per task (eval).
-
-    ``pack_mode``:
-      - ``demo_pair`` (paper): train emits each demo I→O as seq-25; eval emits test I→O.
-      - ``packed`` (legacy): demos+query concatenated, PAD to ``max_seq_len`` (default 128).
+    When ``augment`` is True: 8 D₄ × ``n_color_perms`` random color maps per task;
+    emit one seq-25 sample per demonstration pair × aug.
+    When False: one unaugmented test I→O sample per task (eval).
     """
-    if pack_mode not in (PACK_MODE_DEMO_PAIR, PACK_MODE_PACKED):
-        raise ValueError(f"unknown pack_mode={pack_mode!r}")
-    if max_seq_len is None:
-        max_seq_len = default_max_seq_len(pack_mode)
-
     files = list_task_files(data_dir)
     if max_tasks is not None:
         files = files[:max_tasks]
@@ -246,20 +176,10 @@ def build_cache(
         for d4_k in d4_ks:
             for perm in perms:
                 demos, q_in, q_out = _transform_task(task, d4_k, perm)
-                if pack_mode == PACK_MODE_DEMO_PAIR:
-                    # Paper: train on demonstration pairs; eval on the test pair.
-                    pairs = demos if augment else [(q_in, q_out)]
-                    for inp, out in pairs:
-                        tok, tgt, mask = pack_demo_pair(inp, out, max_seq_len=max_seq_len)
-                        all_tokens.append(tok)
-                        all_targets.append(tgt)
-                        all_masks.append(mask)
-                        all_puzzle.append(pid)
-                        task_ids.append(tid)
-                else:
-                    tok, tgt, mask = pack_sequence(
-                        demos, q_in, q_out, max_seq_len=max_seq_len
-                    )
+                # Paper: train on demonstration pairs; eval on the test pair.
+                pairs = demos if augment else [(q_in, q_out)]
+                for inp, out in pairs:
+                    tok, tgt, mask = pack_demo_pair(inp, out, max_seq_len=max_seq_len)
                     all_tokens.append(tok)
                     all_targets.append(tgt)
                     all_masks.append(mask)
@@ -276,7 +196,6 @@ def build_cache(
         query_mask=query_mask,
         puzzle_ids=puzzle_ids,
         task_ids=task_ids,
-        pack_mode=pack_mode,
     )
 
 
