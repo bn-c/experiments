@@ -128,8 +128,13 @@ trains it on the Hugging Face `clane9/imagenet-100` subset. Dependencies (includ
 AMD ROCm nightly build of PyTorch, installed from `download.pytorch.org`'s wheel index
 rather than built from source) are managed with [uv](https://docs.astral.sh/uv/):
 
+- Index: `https://download.pytorch.org/whl/nightly/rocm7.1`
+- Extra: `uv sync --extra rocm` installs `triton-rocm` (ROCm 7.x rename of `pytorch-triton-rocm`)
+- `requires-python = ">=3.12,<3.13"` — desk is 3.12; broader ranges fail on 3.13/3.14 wheel splits
+- Known quirk: Triton HIP headers may report 7.2 while the Torch runtime is 7.1; Inductor still worked on desk smoke
+
 ```bash
-uv sync
+uv sync --extra rocm
 uv run python scripts/train_vit_imagenet100.py --epochs 30 --batch-size 128
 ```
 

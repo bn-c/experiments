@@ -1,6 +1,8 @@
 [project]
 name = "drf-vit"
 version = "0.1.0"
+# Clamp to 3.12: ROCm 7.1 nightlies (torch/triton-rocm) resolve cleanly on CPython 3.12;
+# broader ranges pull py3.13/3.14 wheel splits that fail on the desk AMD box.
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch",
@@ -20,7 +22,8 @@ video = [
 # The AMD ROCm nightly PyTorch build this project is developed against. Kept out of
 # the hard dependencies so `uv sync` still resolves on a CUDA/CPU machine; install it
 # with `uv sync --extra rocm` on an AMD box.
-# ROCm 7.x nightlies renamed the Triton wheel from pytorch-triton-rocm → triton-rocm.
+# ROCm 7.1 index (`nightly/rocm7.1`); upstream renamed the Triton wheel
+# pytorch-triton-rocm → triton-rocm. Lock pins concrete nightly wheels (see uv.lock).
 rocm = [
     "triton-rocm",
 ]
