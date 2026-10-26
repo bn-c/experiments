@@ -147,7 +147,13 @@ class NGPTLayer(nn.Module):
     def _linear(self, linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self._drop_weight(linear.weight), linear.bias)
 
-    def forward(self, z: torch.Tensor, variational_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        z: torch.Tensor,
+        *,
+        variational_mask: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         B, S, D = z.shape
         if variational_mask is not None:
             z = z * variational_mask
@@ -165,9 +171,18 @@ class NGPTLayer(nn.Module):
         sin = sin.to(dtype=q.dtype, device=q.device)
         q, k = apply_rope(q, k, cos, sin)
 
-        # QK scale (nGPT): s_qk per head dim
+        # nGPT-style: unit Q/K → logits are s_qk-scaled cosines (no /√d_h).
         scale = self.s_qk.to(dtype=q.dtype)
-        attn = torch.softmax((q * scale) @ k.transpose(-2, -1) / (self.head_dim**0.5), dim=-1)
+        logits = (q * scale) @ k.transpose(-2, -1)
+        if pad_mask is not None:
+            # pad_mask [B, S] True=valid; block attention to PAD keys
+            key_ok = pad_mask[:, None, None, :]  # [B, 1, 1, S]
+            logits = logits.masked_fill(~key_ok, torch.finfo(logits.dtype).min)
+        attn = torch.softmax(logits, dim=-1)
+        if pad_mask is not None:
+            # Zero weights on all-masked rows (numerical safety) and pad queries
+            attn = torch.nan_to_num(attn, nan=0.0)
+            attn = attn * pad_mask[:, None, :, None].to(dtype=attn.dtype)
         attn_out = (attn @ v).transpose(1, 2).contiguous().view(B, S, D)
         attn_out = project_to_sphere(self._linear(self.out_proj, attn_out))
 
@@ -219,19 +234,36 @@ class NormalizedTransformerBlock(nn.Module):
             ]
         )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        if self.training and self.variational_dropout > 0:
-            # Same Bernoulli mask across sequence positions (variational / locked dropout).
-            keep = 1.0 - self.variational_dropout
-            mask = (
-                torch.bernoulli(
-                    torch.full((z.shape[0], 1, z.shape[2]), keep, device=z.device, dtype=z.dtype)
-                )
-                / keep
-            )
-            z = z * mask
+    def sample_variational_mask(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        """Bernoulli mask shared across sequence *and* solver iters (locked)."""
+        if not self.training or self.variational_dropout <= 0:
+            return None
+        keep = 1.0 - self.variational_dropout
+        return (
+            torch.bernoulli(torch.full((batch_size, 1, self.d_model), keep, device=device, dtype=dtype))
+            / keep
+        )
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        *,
+        variational_mask: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Caller should pass a locked mask across solver iters. Fallback samples once
+        # per forward only when none is provided (single-shot calls).
+        if variational_mask is None:
+            variational_mask = self.sample_variational_mask(z.shape[0], z.device, z.dtype)
+        if variational_mask is not None:
+            z = z * variational_mask
         for layer in self.layers:
-            z = layer(z, variational_mask=None)
+            z = layer(z, variational_mask=None, pad_mask=pad_mask)
         return z
 
 
@@ -260,6 +292,7 @@ class SFPRM(nn.Module):
         self.max_seq_len = max_seq_len
         self.puzzle_emb_len = puzzle_emb_len
         self.n_puzzles = n_puzzles
+        self.variational_dropout = variational_dropout
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
         # Per-puzzle embedding (length 1 for Mini-ARC); prepended to the sequence.
@@ -356,25 +389,53 @@ class SFPRM(nn.Module):
         pad = torch.zeros(B, self.puzzle_emb_len, dtype=torch.bool, device=query_mask.device)
         return torch.cat([pad, query_mask], dim=1)
 
-    def propose(self, z: torch.Tensor, z_input: torch.Tensor) -> torch.Tensor:
+    def token_pad_mask(self, x: torch.Tensor, pad_id: int = PAD_ID) -> torch.Tensor:
+        """
+        Valid-token mask for packed sequences (+ puzzle emb), shape [B, puzzle+S].
+
+        True = real content (puzzle emb + non-PAD tokens). PAD packing slots are False
+        so chordal halt / attention ignore them.
+        """
+        valid = x != pad_id  # [B, S]
+        if self.puzzle_emb_len <= 0:
+            return valid
+        pe = torch.ones(x.shape[0], self.puzzle_emb_len, dtype=torch.bool, device=x.device)
+        return torch.cat([pe, valid], dim=1)
+
+    def sample_variational_mask(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+        """Sample a locked variational mask once per segment (reuse across solver iters)."""
+        return self.core_block.sample_variational_mask(batch_size, device, dtype)
+
+    def propose(
+        self,
+        z: torch.Tensor,
+        z_input: torch.Tensor,
+        *,
+        variational_mask: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """F_θ(z; x) = f_θ(Slerp_λ(z, x)) — undamped proposal (for residual / halt)."""
         z_inj = guarded_slerp(z, z_input, self.lambda_param)
-        return self.core_block(z_inj)
+        return self.core_block(z_inj, variational_mask=variational_mask, pad_mask=pad_mask)
 
     def step(
         self,
         z: torch.Tensor,
         z_input: torch.Tensor,
         eta: torch.Tensor,
+        *,
+        variational_mask: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         One damped solver iteration.
 
         Returns (z_next, z_tilde proposal, per-sample chordal residual).
         ``eta`` is per-sample in (0, 1], shape [B] or broadcastable.
+        Pass a locked ``variational_mask`` across iters within a BPTT segment.
         """
-        z_tilde = self.propose(z, z_input)
-        residual = chordal_residual(z, z_tilde)
+        z_tilde = self.propose(z, z_input, variational_mask=variational_mask, pad_mask=pad_mask)
+        residual = chordal_residual(z, z_tilde, token_mask=pad_mask)
         z_next = guarded_slerp(z, z_tilde, eta)
         return z_next, z_tilde, residual
 

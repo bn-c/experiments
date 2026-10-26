@@ -205,12 +205,15 @@ def eval_pass_at_1(
         pid = cache.puzzle_ids[i : i + 1]
         with torch.autocast(device_type=amp_device, dtype=amp_dtype, enabled=device.type == "cuda"):
             z_input = model.get_input_embedding(x, pid)
+            pad_mask = model.token_pad_mask(x)
             z = z_input.clone()
             state = SolverState.init(1, device, cfg)
             for _ in range(max_loops):
                 if bool(state.halted.all()):
                     break
-                z, _residual, state = solver_step(model, z, z_input, state, cfg)
+                z, _residual, state = solver_step(
+                    model, z, z_input, state, cfg, pad_mask=pad_mask
+                )
             qmask = model.expand_query_mask(mask)
             logits = model.decode_logits(z)[qmask]
             pred = logits.argmax(dim=-1)
@@ -311,8 +314,18 @@ def train(args: argparse.Namespace) -> None:
 
         with torch.autocast(device_type=amp_device, dtype=amp_dtype, enabled=use_amp):
             z_input = model.get_input_embedding(x, pid)
+            pad_mask = model.token_pad_mask(x)
             z, state = carry.load(idx, z_input)
-            z, state, _residual = run_segment(model, z, z_input, state, solver_cfg, k=args.bptt_k)
+            # Locked variational mask sampled once inside run_segment; pad_mask ignores PAD.
+            z, state, _residual = run_segment(
+                model,
+                z,
+                z_input,
+                state,
+                solver_cfg,
+                k=args.bptt_k,
+                pad_mask=pad_mask,
+            )
 
             qmask = model.expand_query_mask(mask)
             logits = model.decode_logits(z)[qmask]

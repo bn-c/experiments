@@ -104,12 +104,28 @@ def geodesic_damping(z_prev: torch.Tensor, z_prop: torch.Tensor, eta: torch.Tens
     return guarded_slerp(z_prev, z_prop, eta)
 
 
-def chordal_residual(z: torch.Tensor, z_tilde: torch.Tensor) -> torch.Tensor:
+def chordal_residual(
+    z: torch.Tensor,
+    z_tilde: torch.Tensor,
+    token_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     """
     Per-sample worst-token chordal residual (paper eq. 9).
 
     r_c = max_t (1 − ⟨z_t, z̃_t⟩). Returns shape [B].
+
+    When ``token_mask`` is provided ([B, T] bool, True = valid), PAD / packing
+    positions are excluded so halt is not driven by pad tokens.
     """
     # ⟨z, z̃⟩ token-wise → [B, T]
     cos = (z * z_tilde).sum(dim=-1).clamp(-1.0, 1.0)
-    return (1.0 - cos).amax(dim=-1)
+    per_tok = 1.0 - cos
+    if token_mask is None:
+        return per_tok.amax(dim=-1)
+    # Masked amax: invalid positions → -inf so they never win the max
+    neg_inf = torch.finfo(per_tok.dtype).min
+    masked = per_tok.masked_fill(~token_mask, neg_inf)
+    out = masked.amax(dim=-1)
+    # Degenerate all-pad rows → 0 (already halted / ignore)
+    has_valid = token_mask.any(dim=-1)
+    return torch.where(has_valid, out, torch.zeros_like(out))

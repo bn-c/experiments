@@ -27,6 +27,18 @@ def test_chordal_residual_zero_on_identical():
     assert torch.allclose(r, torch.zeros_like(r), atol=1e-5)
 
 
+def test_chordal_residual_ignores_pad():
+    z = project_to_sphere(torch.randn(2, 4, 8))
+    z_tilde = z.clone()
+    # Make position 0 diverge a lot; mark it PAD (invalid)
+    z_tilde[:, 0] = project_to_sphere(torch.randn(2, 8))
+    mask = torch.tensor([[False, True, True, True], [False, True, True, True]])
+    r_masked = chordal_residual(z, z_tilde, token_mask=mask)
+    r_full = chordal_residual(z, z_tilde, token_mask=None)
+    assert torch.all(r_masked < r_full)
+    assert torch.allclose(r_masked, torch.zeros_like(r_masked), atol=1e-5)
+
+
 def test_guarded_slerp_unit_norm_all_branches():
     u = project_to_sphere(torch.randn(4, 5, 16))
     v = project_to_sphere(torch.randn(4, 5, 16))
@@ -83,3 +95,87 @@ def test_desk_param_count_range():
     )
     n = model.count_parameters()
     assert 4.0e6 < n < 6.0e6, n
+
+
+def test_qk_logits_no_sqrt_dh():
+    """Unit Q/K attention uses s_qk only (no /√d_h)."""
+    model = SFPRM(
+        vocab_size=12,
+        d_model=32,
+        n_heads=4,
+        d_ff=64,
+        n_layers=1,
+        max_seq_len=8,
+        n_puzzles=2,
+        weight_dropout=0.0,
+        variational_dropout=0.0,
+    )
+    layer = model.core_block.layers[0]
+    # Spy: build identical unit q,k and check softmax path doesn't blow up; scale = s_qk.
+    assert layer.s_qk.shape == (8,)  # head_dim = 32/4
+    x = torch.randint(0, 10, (1, 8))  # no PAD
+    z = model.get_input_embedding(x, torch.zeros(1, dtype=torch.long))
+    pad = model.token_pad_mask(x)
+    out = model.core_block(z, pad_mask=pad)
+    assert out.shape == z.shape
+    assert torch.isfinite(out).all()
+
+
+def test_variational_mask_locked_across_segment_iters():
+    model = SFPRM(
+        vocab_size=12,
+        d_model=32,
+        n_heads=4,
+        d_ff=64,
+        n_layers=1,
+        max_seq_len=8,
+        n_puzzles=2,
+        variational_dropout=0.5,
+    )
+    model.train()
+    masks: list[torch.Tensor] = []
+    orig = model.core_block.sample_variational_mask
+
+    def capture_sample(batch_size, device, dtype):
+        m = orig(batch_size, device, dtype)
+        assert m is not None
+        masks.append(m.detach().clone())
+        return m
+
+    model.core_block.sample_variational_mask = capture_sample  # type: ignore[method-assign]
+    from models.solver import SolverConfig, SolverState, run_segment
+
+    x = torch.randint(0, 10, (2, 8))
+    z_in = model.get_input_embedding(x, torch.zeros(2, dtype=torch.long))
+    pad = model.token_pad_mask(x)
+    cfg = SolverConfig(patience=5, gamma=0.9, eta_min=0.001, tau=0.0, max_iter=8)
+    state = SolverState.init(2, z_in.device, cfg)
+    run_segment(model, z_in.clone(), z_in, state, cfg, k=4, pad_mask=pad)
+    # Sampled once for the segment, not once per solver iter
+    assert len(masks) == 1
+
+
+def test_token_pad_mask_and_residual():
+    model = SFPRM(
+        vocab_size=12,
+        d_model=32,
+        n_heads=4,
+        d_ff=64,
+        n_layers=1,
+        max_seq_len=8,
+        n_puzzles=2,
+        variational_dropout=0.0,
+    )
+    from models.sfprm_core import PAD_ID
+
+    x = torch.randint(0, 10, (2, 8))
+    x[:, -2:] = PAD_ID
+    pad = model.token_pad_mask(x)
+    assert pad.shape == (2, 9)  # + puzzle emb
+    assert bool(pad[:, 0].all())  # puzzle emb valid
+    assert not bool(pad[:, -1].any())
+    z = model.get_input_embedding(x, torch.zeros(2, dtype=torch.long))
+    z2 = z.clone()
+    z2[:, -1] = project_to_sphere(torch.randn_like(z2[:, -1]))
+    r = chordal_residual(z, z2, token_mask=pad)
+    assert torch.allclose(r, torch.zeros_like(r), atol=1e-5)

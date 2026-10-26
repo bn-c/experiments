@@ -89,6 +89,9 @@ def solver_step(
     z_input: torch.Tensor,
     state: SolverState,
     cfg: SolverConfig,
+    *,
+    variational_mask: torch.Tensor | None = None,
+    pad_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, SolverState]:
     """
     One geodesic damped step with schedule update on detached residual.
@@ -96,7 +99,13 @@ def solver_step(
     Returns (z_next, residual_detached_for_logging, updated_state).
     Halted samples keep their z (η effectively unused).
     """
-    z_next, _z_tilde, residual = model.step(z, z_input, state.eta)
+    z_next, _z_tilde, residual = model.step(
+        z,
+        z_input,
+        state.eta,
+        variational_mask=variational_mask,
+        pad_mask=pad_mask,
+    )
     # Keep halted samples frozen
     z_out = torch.where(state.halted[:, None, None], z, z_next)
     state = update_schedule(state, residual, cfg)
@@ -110,13 +119,29 @@ def run_segment(
     state: SolverState,
     cfg: SolverConfig,
     k: int,
+    *,
+    variational_mask: torch.Tensor | None = None,
+    pad_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, SolverState, torch.Tensor]:
     """
     Run up to ``k`` solver steps (BPTT window). Returns (z, state, last_residual).
+
+    Samples a locked variational mask once (if training) when none is passed, and
+    reuses it for every iter in the segment.
     """
+    if variational_mask is None and model.training:
+        variational_mask = model.sample_variational_mask(z.shape[0], z.device, z.dtype)
     residual = state.best_residual
     for _ in range(k):
         if bool(state.halted.all()):
             break
-        z, residual, state = solver_step(model, z, z_input, state, cfg)
+        z, residual, state = solver_step(
+            model,
+            z,
+            z_input,
+            state,
+            cfg,
+            variational_mask=variational_mask,
+            pad_mask=pad_mask,
+        )
     return z, state, residual

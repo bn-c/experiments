@@ -72,12 +72,15 @@ def evaluate_task(
     amp_dtype = torch.bfloat16 if use_amp else torch.float32
     with torch.autocast(device_type=device_type, dtype=amp_dtype, enabled=use_amp):
         z_input = model.get_input_embedding(x_test, puzzle_id)
+        pad_mask = model.token_pad_mask(x_test)
         z = z_input.clone()
         state = SolverState.init(1, x_test.device, cfg)
         for _ in range(max_loops):
             if bool(state.halted.all()):
                 break
-            z, _residual, state = solver_step(model, z, z_input, state, cfg)
+            z, _residual, state = solver_step(
+                model, z, z_input, state, cfg, pad_mask=pad_mask
+            )
         qmask = model.expand_query_mask(query_mask)
         pred_logits = model.decode_logits(z)[qmask]
         pred_grid = pred_logits.argmax(dim=-1)

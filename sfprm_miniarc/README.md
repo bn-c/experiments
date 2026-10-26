@@ -35,8 +35,9 @@ carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have head
 ## Remaining gaps vs paper
 
 - **Vote-over-augs** Pass@1 (paper B.1/B.4) not implemented — eval is unaugmented task Pass@1
-- Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation
+- Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation (PAD slots are masked in attn + chordal residual)
 - Width 384 vs paper 512 (16GB); full-width flag available
+- Global batch 512 vs paper 768
 - γ_eval=0.9 (paper Mini-ARC train/eval both 0.9) — OK; Sudoku uses 0.99 at eval
 
 ## Layout
