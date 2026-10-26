@@ -62,14 +62,14 @@ class TRMMLP(nn.Module):
         return y, z
 
     def deep_recursion(self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run ``T-1`` no-grad recursions then one with grad; detach carry."""
+        """Run ``T-1`` no-grad recursions then one with grad (live tensors for heads)."""
         cfg = self.cfg
         if cfg.T > 1:
             with torch.no_grad():
                 for _ in range(cfg.T - 1):
                     y, z = self.latent_recursion(x, y, z)
         y, z = self.latent_recursion(x, y, z)
-        return y.detach(), z.detach()
+        return y, z
 
     def logits_from_y(self, y: torch.Tensor) -> torch.Tensor:
         """Map answer embeddings to per-cell class logits ``(B, 81, 9)``."""
@@ -90,6 +90,9 @@ class TRMMLP(nn.Module):
         """
         One deep-supervision / ACT micro-step.
 
+        Matches paper Algorithm 3 / upstream: heads see live ``y`` (grads flow through
+        the last ``latent_recursion``); carry returned for the next step is detached.
+
         Returns ``(y, z, logits, q_halt_logits)`` where ``q_halt_logits`` is ``(B,)``.
         """
         y, z = self.deep_recursion(x, y, z)
@@ -97,7 +100,8 @@ class TRMMLP(nn.Module):
         z = self.z_norm(z)
         logits = self.logits_from_y(y)
         q_halt = self.q_head(y.mean(dim=1)).squeeze(-1)
-        return y, z, logits, q_halt
+        # Detach carry only after heads — ``y.detach()`` must not feed the heads.
+        return y.detach(), z.detach(), logits, q_halt
 
     def forward_supervised(
         self,

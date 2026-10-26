@@ -41,6 +41,31 @@ def test_supervision_step_returns_q_halt() -> None:
     assert q_halt.shape == (3,)
 
 
+def test_supervision_step_backprops_into_backbone() -> None:
+    """Paper Algorithm 3: heads see live y; detach is only for the next-step carry."""
+    cfg = tiny_model_config()
+    model = TRMMLP(cfg)
+    batch = _fake_batch(2)
+    x = model.embed_puzzle(batch['puzzle'])
+    y, z = model.initial_state(2, batch['puzzle'].device)
+    _y, _z, logits, q_halt = model.supervision_step(x, y, z)
+    loss = masked_cross_entropy(logits, batch['solution'], batch['mask'])
+    loss = loss + 0.5 * torch.nn.functional.binary_cross_entropy_with_logits(
+        q_halt,
+        torch.zeros_like(q_halt),
+    )
+    loss.backward()
+    backbone_grads = [
+        p.grad.abs().sum().item()
+        for n, p in model.named_parameters()
+        if n.startswith('backbone.') and p.grad is not None
+    ]
+    assert backbone_grads, 'expected grads on backbone parameters'
+    assert sum(backbone_grads) > 0.0
+    assert model.puzzle_embed.weight.grad is not None
+    assert model.puzzle_embed.weight.grad.abs().sum().item() > 0.0
+
+
 class _ListDS(Dataset):
     def __len__(self) -> int:
         return 4
