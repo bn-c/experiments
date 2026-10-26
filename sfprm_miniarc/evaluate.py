@@ -171,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--puzzle_emb_len", type=int, default=1)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--max_tasks", type=int, default=None)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--n_color_perms", type=int, default=8)
+    p.add_argument("--vote_aug_batch", type=int, default=64)
     p.add_argument("--use_ema", action="store_true", default=True)
     p.add_argument("--no_ema", action="store_true")
     p.add_argument("--wandb-project", type=str, default="sfprm-miniarc")
@@ -217,12 +220,43 @@ def main(argv: list[str] | None = None) -> int:
     n = len(cache)
     pas = hits / max(n, 1)
     mean_halt = halt_sum / max(n, 1)
-    print(f"Pass@1: {pas:.4f} ({hits}/{n})")
+    print(f"Pass@1 (1-shot): {pas:.4f} ({hits}/{n})")
     print(f"Mean halt steps: {mean_halt:.2f}")
-    print("Note: vote-over-augs (paper) not applied — unaugmented task Pass@1 only.")
+
+    # Paper vote-over-augs on the same checkpoint (also yields unaug as a check).
+    from eval_vote_augs import eval_vote_augs  # local import keeps CLI light
+
+    vote = eval_vote_augs(
+        model,
+        args.data_dir,
+        device=device,
+        max_seq_len=args.max_seq_len,
+        n_color_perms=args.n_color_perms,
+        aug_batch=args.vote_aug_batch,
+        seed=args.seed,
+        tau=args.tau,
+        max_loops=args.max_loops,
+        gamma=args.gamma,
+        max_tasks=args.max_tasks,
+    )
+    print(
+        f"vote Pass@1: {vote.vote_pass_at_1:.4f}  "
+        f"mean_halt/aug={vote.vote_mean_halt_per_aug:.2f}  wall={vote.wall_s:.1f}s"
+    )
+    print(
+        f"vote-path 1-shot Pass@1: {vote.unaug_pass_at_1:.4f} "
+        f"(should ≈ standalone 1-shot above)"
+    )
 
     if wandb_on:
-        wandb.log({"eval/pass_at_1": pas, "eval/mean_halt_steps": mean_halt})
+        wandb.log(
+            {
+                "eval/pass_at_1": pas,
+                "eval/vote_pass_at_1": vote.vote_pass_at_1,
+                "eval/mean_halt_steps": mean_halt,
+                "eval/vote_mean_halt_steps": vote.vote_mean_halt_per_aug,
+            }
+        )
         wandb.finish()
     return 0
 
