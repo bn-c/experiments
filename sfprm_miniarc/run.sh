@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end Mini-ARC SFPRM baseline (full 12k-step budget).
+# End-to-end Mini-ARC SFPRM (paper-faithful, desk 12k-step budget).
 # Smoke test instead: ./run.sh --smoke
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -23,6 +23,8 @@ if [[ "$SMOKE" -eq 1 ]]; then
     --eval_every 3 \
     --ckpt_every 3 \
     --n_color_perms 2 \
+    --max_loops 8 \
+    --max_iter_train 4 \
     --no-wandb \
     --out_dir ./checkpoints/smoke \
     "$@"
@@ -37,19 +39,19 @@ if [[ "$SMOKE" -eq 1 ]]; then
   exit 0
 fi
 
-echo "[2/3] Training SFPRM (Budget: 12,000 steps, ~2 hours on 16GB GPU)..."
+echo "[2/3] Training SFPRM (12,000 steps; paper solver/arch; 16GB dims)..."
 python train.py \
   --steps 12000 \
   --bptt_k 6 \
   --batch_size 512 \
-  --lr_muon 0.02 \
+  --lr_muon 5e-3 \
   --lr_adam 1e-3 \
-  --compile \
+  --weight_decay 0.1 \
   --out_dir ./checkpoints \
   "$@"
 
-echo "[3/3] Evaluating Adaptive Chordal Halting on Test Split..."
+echo "[3/3] Evaluating paper chordal halt (τ=0.01, max_iter=200)..."
 python evaluate.py \
   --checkpoint ./checkpoints/model_best.pt \
-  --epsilon 1e-3 \
-  --max_loops 100
+  --tau 0.01 \
+  --max_loops 200

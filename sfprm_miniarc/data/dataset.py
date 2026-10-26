@@ -22,7 +22,9 @@ import torch
 GRID = 5
 CELLS = GRID * GRID
 PAD_ID = 10
+SEP_ID = 11  # paper Mini-ARC vocab=12 (colors 0–9 + PAD + SEP)
 NUM_COLORS = 10  # 0–9; 0 is background (not permuted)
+VOCAB_SIZE = 12
 
 
 @dataclass
@@ -32,13 +34,21 @@ class MiniARCCache:
     tokens: torch.Tensor  # [N, L] long
     targets: torch.Tensor  # [N, L] long (valid under query_mask)
     query_mask: torch.Tensor  # [N, L] bool
+    puzzle_ids: torch.Tensor  # [N] long — integer task index for puzzle-emb
     task_ids: list[str]
 
     def __len__(self) -> int:
         return int(self.tokens.shape[0])
 
-    def batch(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.tokens[indices], self.targets[indices], self.query_mask[indices]
+    def batch(
+        self, indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            self.tokens[indices],
+            self.targets[indices],
+            self.query_mask[indices],
+            self.puzzle_ids[indices],
+        )
 
 
 def _as_grid(arr) -> np.ndarray:
@@ -167,11 +177,16 @@ def build_cache(
     all_tokens: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
     all_masks: list[np.ndarray] = []
+    all_puzzle: list[int] = []
     task_ids: list[str] = []
+    name_to_id: dict[str, int] = {}
 
     for path in files:
         task = load_task_json(path)
         tid = path.stem
+        if tid not in name_to_id:
+            name_to_id[tid] = len(name_to_id)
+        pid = name_to_id[tid]
         if augment:
             perms = [identity] + [random_color_perm(rng) for _ in range(n_color_perms - 1)]
             d4_ks = range(8)
@@ -186,12 +201,20 @@ def build_cache(
                 all_tokens.append(tok)
                 all_targets.append(tgt)
                 all_masks.append(mask)
+                all_puzzle.append(pid)
                 task_ids.append(tid)
 
     tokens = torch.tensor(np.stack(all_tokens), dtype=torch.long, device=device)
     targets = torch.tensor(np.stack(all_targets), dtype=torch.long, device=device)
     query_mask = torch.tensor(np.stack(all_masks), dtype=torch.bool, device=device)
-    return MiniARCCache(tokens=tokens, targets=targets, query_mask=query_mask, task_ids=task_ids)
+    puzzle_ids = torch.tensor(all_puzzle, dtype=torch.long, device=device)
+    return MiniARCCache(
+        tokens=tokens,
+        targets=targets,
+        query_mask=query_mask,
+        puzzle_ids=puzzle_ids,
+        task_ids=task_ids,
+    )
 
 
 def make_train_indices(n: int, batch_size: int, step: int, generator: torch.Generator) -> torch.Tensor:
