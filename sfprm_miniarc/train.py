@@ -172,7 +172,7 @@ def eval_pass_at_1(
     max_loops: int,
     device: torch.device,
 ) -> tuple[float, float]:
-    """Backward-compatible wrapper → (pass_at_1, mean_halt_steps)."""
+    """Backward-compatible wrapper -> (pass_at_1, mean_halt_steps)."""
     m = eval_metrics(
         model,
         cache,
