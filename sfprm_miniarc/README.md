@@ -34,7 +34,6 @@ carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have head
 
 ## Remaining gaps vs paper
 
-- **Vote-over-augs** Pass@1 (paper B.1/B.4) not implemented — eval is unaugmented task Pass@1
 - Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation (PAD slots are masked in attn + chordal residual)
 - Width 384 vs paper 512 (16GB); full-width flag available
 - Global batch 512 vs paper 768
@@ -52,11 +51,22 @@ sfprm_miniarc/
 ├── models/ema.py
 ├── optim/muon.py
 ├── train.py
-├── evaluate.py
+├── evaluate.py               # unaugmented chordal-halt Pass@1
+├── eval_vote_augs.py         # D₄×color vote-over-augs (batched)
+├── scripts/bench_compile.py  # eager vs torch.compile on model.step
 └── run.sh
 ```
 
 ## Setup / run
+
+Root venv (ROCm 7.1 nightlies + `triton-rocm`; Python 3.12-only clamp — see root README):
+
+```bash
+# from repo root
+uv sync --extra rocm
+```
+
+Package-local:
 
 ```bash
 cd sfprm_miniarc
@@ -70,4 +80,16 @@ Eval:
 
 ```bash
 python evaluate.py --checkpoint ./checkpoints/model_best.pt --tau 0.01 --max_loops 200
+python eval_vote_augs.py --checkpoint ./checkpoints/model_best.pt   # vote-over-augs
 ```
+
+### `torch.compile` microbench
+
+One-off timing of paper `SFPRM.step(z, z_input, eta)` (static shapes, `no_grad` — **not** train throughput):
+
+```bash
+cd sfprm_miniarc
+python scripts/bench_compile.py --batch 64 --d-model 384
+```
+
+Desk ROCm 7.1 (baseline tree, pre-paper API) saw ~2.1–2.4×; re-run after the paper `step` signature change before citing numbers.
