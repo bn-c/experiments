@@ -31,6 +31,8 @@ class TRMMLP(nn.Module):
         self.puzzle_bias = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
         self.backbone = MLPMixerBackbone(SEQ_LEN, cfg.d_model, cfg.n_layers, cfg.mlp_expansion)
         self.out_norm = nn.LayerNorm(cfg.d_model)
+        self.y_norm = nn.LayerNorm(cfg.d_model)
+        self.z_norm = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.n_classes)
         self.y_init = nn.Parameter(torch.zeros(1, SEQ_LEN, cfg.d_model))
         self.z_init = nn.Parameter(torch.zeros(1, SEQ_LEN, cfg.d_model))
@@ -85,6 +87,8 @@ class TRMMLP(nn.Module):
         step_logits: list[torch.Tensor] = []
         for _ in range(self.cfg.max_supervision_steps):
             y, z = self.deep_recursion(x, y, z)
+            y = self.y_norm(y)
+            z = self.z_norm(z)
             step_logits.append(self.logits_from_y(y))
         return y, step_logits
 
@@ -95,4 +99,6 @@ class TRMMLP(nn.Module):
         with torch.no_grad():
             for _ in range(self.cfg.max_supervision_steps):
                 y, z = self.deep_recursion(x, y, z)
+                y = self.y_norm(y)
+                z = self.z_norm(z)
         return self.logits_from_y(y)
