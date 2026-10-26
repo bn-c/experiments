@@ -1,7 +1,12 @@
 import torch
 from torch.optim.lr_scheduler import LinearLR
 
-from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager, _CheckpointData
+from ebm.training.checkpoint import (
+    LAST_CHECKPOINT_NAME,
+    CheckpointManager,
+    _CheckpointData,
+    resolve_resume_position,
+)
 
 
 def _make_data(epoch: int = 0, val_energy: float = 1.0, cell_accuracy: float = 0.1) -> _CheckpointData:
@@ -73,6 +78,22 @@ def test_save_last_and_load_scheduler(tmp_path):
     meta = CheckpointManager.load(last_path, new_model, new_optimizer, new_scheduler)
     assert meta['epoch'] == 2
     assert new_scheduler.state_dict() == scheduler.state_dict()
+
+
+def test_resolve_resume_position():
+    assert resolve_resume_position(1, None, 100) == (2, 0)
+    assert resolve_resume_position(1, 100, 100) == (2, 0)
+    assert resolve_resume_position(2, 50, 100) == (2, 50)
+
+
+def test_save_last_persists_batch_in_epoch(tmp_path):
+    mgr = CheckpointManager(tmp_path, keep_top_k=1)
+    data = _make_data(epoch=3, cell_accuracy=0.5)
+    data.batch_in_epoch = 42
+    scheduler = LinearLR(data.optimizer, start_factor=1.0, total_iters=10)
+    path = mgr.save_last(data, scheduler)
+    meta = torch.load(path, weights_only=True)
+    assert meta['batch_in_epoch'] == 42
 
 
 def test_load_restores_model(tmp_path):

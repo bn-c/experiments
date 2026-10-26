@@ -17,6 +17,25 @@ LAST_CHECKPOINT_NAME = 'checkpoint.last.pt'
 _TOP_K_PATTERN = re.compile(r'^checkpoint_epoch(\d+)_acc([\d.]+)\.pt$')
 
 
+def resolve_resume_position(
+    saved_epoch: int,
+    batch_in_epoch: int | None,
+    batches_per_epoch: int,
+) -> tuple[int, int]:
+    """
+    Map checkpoint epoch/batch fields to the next training loop position.
+
+    Returns:
+        ``(start_epoch, skip_batches)`` — skip_batches applies only on start_epoch.
+
+    """
+    if batch_in_epoch is None:
+        return saved_epoch + 1, 0
+    if batch_in_epoch >= batches_per_epoch:
+        return saved_epoch + 1, 0
+    return saved_epoch, batch_in_epoch
+
+
 @dataclass(order=True)
 class _CheckpointEntry:
     """Tracks a checkpoint by its metric value and path."""
@@ -35,6 +54,7 @@ class _CheckpointData:
     step: int
     val_energy: float
     cell_accuracy: float
+    batch_in_epoch: int = 0
 
 
 class CheckpointManager:
@@ -102,6 +122,7 @@ class CheckpointManager:
                 'step': data.step,
                 'val_energy': data.val_energy,
                 'cell_accuracy': data.cell_accuracy,
+                'batch_in_epoch': data.batch_in_epoch,
             },
             path,
         )
@@ -138,6 +159,7 @@ class CheckpointManager:
                 'step': data.step,
                 'val_energy': data.val_energy,
                 'cell_accuracy': data.cell_accuracy,
+                'batch_in_epoch': data.batch_in_epoch,
             },
             path,
         )

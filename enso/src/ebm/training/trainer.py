@@ -11,7 +11,12 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from ebm.model.jepa import SudokuJEPA
-from ebm.training.checkpoint import LAST_CHECKPOINT_NAME, CheckpointManager, _CheckpointData
+from ebm.training.checkpoint import (
+    LAST_CHECKPOINT_NAME,
+    CheckpointManager,
+    _CheckpointData,
+    resolve_resume_position,
+)
 from ebm.training.losses import compute_loss
 from ebm.training.metrics import (
     compute_cell_accuracy,
@@ -87,6 +92,7 @@ class Trainer:
         self.checkpoint_mgr = CheckpointManager(cfg.train.checkpoint_dir, cfg.train.keep_top_k)
 
         self.start_epoch = 0
+        self._resume_skip_batches = 0
         self.global_step = 0
         self._last_val_energy = 0.0
         self._last_cell_acc = 0.0
@@ -104,16 +110,25 @@ class Trainer:
             logger.warning('Resume checkpoint not found at %s; starting from scratch', path)
             return
         meta = CheckpointManager.load(path, self.model, self.optimizer, self.scheduler)
-        self.start_epoch = int(meta['epoch']) + 1
+        saved_epoch = int(meta['epoch'])
+        batch_raw = meta.get('batch_in_epoch')
+        batch_in_epoch = int(batch_raw) if batch_raw is not None else None
+        self.start_epoch, self._resume_skip_batches = resolve_resume_position(
+            saved_epoch,
+            batch_in_epoch,
+            len(self.train_loader),
+        )
         self.global_step = int(meta.get('step', 0))
         self._last_val_energy = float(meta.get('val_energy', 0.0))
         self._last_cell_acc = float(meta.get('cell_accuracy', 0.0))
         self.checkpoint_mgr.reindex_from_disk()
         logger.info(
-            'Resumed from %s at epoch %d (global_step=%d, last cell_acc=%.4f)',
+            'Resumed from %s at epoch %d batch %d (global_step=%d, skip %d batches, last cell_acc=%.4f)',
             path.name,
             self.start_epoch,
+            self._resume_skip_batches,
             self.global_step,
+            self._resume_skip_batches,
             float(meta.get('cell_accuracy', 0.0)),
         )
         if self.start_epoch >= self.train_cfg.epochs:
@@ -178,7 +193,13 @@ class Trainer:
     def _checkpoint_due(self) -> bool:
         return time.monotonic() - self._last_ckpt_time >= self.train_cfg.checkpoint_interval_sec
 
-    def _checkpoint_data(self, epoch: int, val_energy: float, cell_acc: float) -> _CheckpointData:
+    def _checkpoint_data(
+        self,
+        epoch: int,
+        val_energy: float,
+        cell_acc: float,
+        batch_in_epoch: int,
+    ) -> _CheckpointData:
         return _CheckpointData(
             model=self.model,
             optimizer=self.optimizer,
@@ -186,13 +207,15 @@ class Trainer:
             step=self.global_step,
             val_energy=val_energy,
             cell_accuracy=cell_acc,
+            batch_in_epoch=batch_in_epoch,
         )
 
     def _persist_full_checkpoint_if_due(self, epoch: int, val_energy: float, cell_acc: float) -> None:
         """Top-K + ``checkpoint.last.pt`` after epoch validation when the interval has elapsed."""
         if not self._checkpoint_due():
             return
-        ckpt_data = self._checkpoint_data(epoch, val_energy, cell_acc)
+        batches_per_epoch = len(self.train_loader)
+        ckpt_data = self._checkpoint_data(epoch, val_energy, cell_acc, batches_per_epoch)
         self.checkpoint_mgr.save(ckpt_data)
         self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
         self._last_ckpt_time = time.monotonic()
@@ -203,11 +226,11 @@ class Trainer:
             cell_acc,
         )
 
-    def _save_last_if_due(self, epoch: int) -> None:
+    def _save_last_if_due(self, epoch: int, batch_in_epoch: int) -> None:
         """Resume checkpoint only (no validation); uses metrics from the last epoch val."""
         if not self._checkpoint_due():
             return
-        ckpt_data = self._checkpoint_data(epoch, self._last_val_energy, self._last_cell_acc)
+        ckpt_data = self._checkpoint_data(epoch, self._last_val_energy, self._last_cell_acc, batch_in_epoch)
         self.checkpoint_mgr.save_last(ckpt_data, self.scheduler)
         self._last_ckpt_time = time.monotonic()
         logger.info('Resume checkpoint at epoch %d step %d', epoch, self.global_step)
@@ -224,8 +247,20 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        batch_bar = tqdm(self.train_loader, desc=f'epoch {epoch} train', leave=False)
-        for batch in batch_bar:
+        skip_batches = self._resume_skip_batches if epoch == self.start_epoch else 0
+        if skip_batches:
+            logger.info('Skipping first %d batches of epoch %d (resume)', skip_batches, epoch)
+
+        batch_bar = tqdm(
+            self.train_loader,
+            desc=f'epoch {epoch} train',
+            leave=False,
+            initial=skip_batches,
+            total=len(self.train_loader),
+        )
+        for batch_idx, batch in enumerate(batch_bar):
+            if batch_idx < skip_batches:
+                continue
             puzzle = batch['puzzle'].to(self.device)
             solution = batch['solution'].to(self.device)
             mask = batch['mask'].to(self.device)
@@ -251,7 +286,7 @@ class Trainer:
             self.global_step += 1
             batch_bar.set_postfix(loss=f'{loss_val:.4f}', refresh=False)
 
-            self._save_last_if_due(epoch)
+            self._save_last_if_due(epoch, n_batches)
 
         return total_loss / max(n_batches, 1)
 
