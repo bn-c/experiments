@@ -6,8 +6,8 @@ vote-augs. Not a train-throughput claim. Desk dims default to paper tree
 ``d_model=384`` (16GB); override with ``--d-model 512`` for full width.
 
 Paper API (``main``): ``SFPRM.step(z, z_input, eta, ...) -> (z_next, z_tilde, residual)``.
-``train.py --compile`` remains a dead flag on this tree (not wired to
-``solver_step`` / ``model.step``).
+Same hot path as ``train.py --compile`` (``torch.compile(model.step,
+mode="reduce-overhead")``); this script is the microbench only.
 """
 
 from __future__ import annotations

@@ -38,7 +38,6 @@ carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have head
 - Width 384 vs paper 512 (16GB); full-width flag available
 - Global batch 512 vs paper 768
 - γ_eval=0.9 (paper Mini-ARC train/eval both 0.9) — OK; Sudoku uses 0.99 at eval
-- `train.py --compile` is still a **dead flag** (arg only); use `scripts/bench_compile.py` for a microbench
 
 ## Layout
 
