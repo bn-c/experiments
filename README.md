@@ -23,6 +23,7 @@ four direction-selective channels, object-motion sensitivity, looming).
 | [scripts/check_fovi_mapping.py](scripts/check_fovi_mapping.py) | CLI measuring the kernel-mapping error a structured reference kernel removes |
 | [tests/](tests/) | Unit tests: geometry, resolution invariance, dual regime, DSGC tuning, looming, OMS, device migration, ViT, manifold mapping |
 | [enso/](enso/) | In-tree Sudoku EBM (Enso fork) on HF `sapientinc/sudoku-extreme` — not a git submodule |
+| [trm/](trm/) | TRM-MLP Sudoku experiment ([arXiv:2510.04871](https://arxiv.org/abs/2510.04871)) — staging, not full paper reproduction |
 
 ## Usage
 
