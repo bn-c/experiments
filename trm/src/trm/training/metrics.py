@@ -1,7 +1,7 @@
 """Experiment tracking integration with Weights & Biases."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from trm.config import AppConfig
@@ -34,7 +34,7 @@ def init_wandb(app_cfg: AppConfig, run_name: str | None = None, extra_config: di
         logger.info('W&B not configured, skipping initialization')
         return False
 
-    timestamp = datetime.now(tz=timezone.utc).strftime('%Y%m%d-%H%M%S')
+    timestamp = datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')
     name = f'{run_name}-{timestamp}' if run_name else timestamp
 
     wandb.login(key=app_cfg.wandb_api_key)
@@ -55,12 +55,41 @@ def log_train_step(loss: float, step: int) -> None:
     wandb.log({'train/loss': loss}, step=step)
 
 
-def log_epoch(epoch: int, epoch_loss: float, step: int) -> None:
-    """Log epoch-level training loss to W&B."""
+def log_epoch(
+    epoch: int,
+    epoch_loss: float,
+    step: int,
+    *,
+    cell_accuracy: float,
+    puzzle_accuracy: float,
+) -> None:
+    """Log epoch-level training loss and EMA train accuracies to W&B."""
     if not _wandb_available or wandb.run is None:
         return
 
-    wandb.log({'train/epoch_loss': epoch_loss, 'train/epoch': epoch}, step=step)
+    wandb.log(
+        {
+            'train/epoch_loss': epoch_loss,
+            'train/epoch': epoch,
+            'train/epoch_cell_accuracy': cell_accuracy,
+            'train/epoch_puzzle_accuracy': puzzle_accuracy,
+        },
+        step=step,
+    )
+
+
+def log_validation(cell_accuracy: float, puzzle_accuracy: float, step: int) -> None:
+    """Log validation accuracy metrics to W&B."""
+    if not _wandb_available or wandb.run is None:
+        return
+
+    wandb.log(
+        {
+            'val/cell_accuracy': cell_accuracy,
+            'val/puzzle_accuracy': puzzle_accuracy,
+        },
+        step=step,
+    )
 
 
 def upload_checkpoint_to_wandb(checkpoint_path: Path) -> None:

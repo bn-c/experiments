@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 
-from trm.config import ModelConfig, TrainConfig, tiny_model_config, tiny_train_config
+from trm.config import ModelConfig, tiny_model_config, tiny_train_config
 from trm.model.trm_mlp import TRMMLP
 from trm.training.loss import masked_cross_entropy
 from trm.training.trainer import Trainer
@@ -28,17 +30,16 @@ def test_forward_supervised_shapes() -> None:
     assert step_logits[0].shape == (2, 81, 9)
 
 
+class _ListDS(Dataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        batch = _fake_batch(1)
+        return {k: v[0] for k, v in batch.items()}
+
+
 def test_one_training_step() -> None:
-    from torch.utils.data import DataLoader, Dataset
-
-    class _ListDS(Dataset):
-        def __len__(self) -> int:
-            return 4
-
-        def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-            batch = _fake_batch(1)
-            return {k: v[0] for k, v in batch.items()}
-
     cfg = tiny_model_config()
     model = TRMMLP(cfg)
     train_cfg = tiny_train_config()
@@ -46,6 +47,18 @@ def test_one_training_step() -> None:
     trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'))
     loss = trainer.train_epoch()
     assert loss > 0.0
+
+
+def test_evaluate_loader_returns_accuracies_in_range() -> None:
+    cfg = tiny_model_config()
+    model = TRMMLP(cfg)
+    train_cfg = tiny_train_config()
+    loader = DataLoader(_ListDS(), batch_size=4)
+    trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'), validate=False)
+    trainer.train_epoch()
+    cell_acc, puzzle_acc = trainer._evaluate_loader(loader, desc='test')
+    assert 0.0 <= cell_acc <= 1.0
+    assert 0.0 <= puzzle_acc <= 1.0
 
 
 def test_masked_loss_finite() -> None:
@@ -58,27 +71,18 @@ def test_masked_loss_finite() -> None:
 
 
 def test_train_saves_checkpoint_each_epoch(tmp_path, caplog) -> None:
-    import logging
-    from torch.utils.data import DataLoader, Dataset
-
-    class _ListDS(Dataset):
-        def __len__(self) -> int:
-            return 4
-
-        def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-            batch = _fake_batch(1)
-            return {k: v[0] for k, v in batch.items()}
-
     caplog.set_level(logging.INFO, logger='trm.training.trainer')
     cfg = tiny_model_config()
     model = TRMMLP(cfg)
     train_cfg = tiny_train_config().model_copy(update={'epochs': 2, 'checkpoint_dir': tmp_path})
     loader = DataLoader(_ListDS(), batch_size=4)
-    trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'))
+    trainer = Trainer(model, loader, cfg, train_cfg, torch.device('cpu'), validate=False)
 
-    with patch('trm.training.trainer.init_wandb', return_value=False):
-        with patch('trm.training.trainer.finish_wandb'):
-            trainer.train()
+    with (
+        patch('trm.training.trainer.init_wandb', return_value=False),
+        patch('trm.training.trainer.finish_wandb'),
+    ):
+        trainer.train()
 
     saves = [r.message for r in caplog.records if r.message.startswith('Saved checkpoint')]
     assert len(saves) == 2

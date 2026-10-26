@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from trm.config import ModelConfig, TrainConfig, tiny_model_config, tiny_train_config
 from trm.dataset.loader import SudokuDataset
+from trm.dataset.splits import resolve_val_size, split_train_val
 from trm.dataset.torch_dataset import SudokuTorchDataset
 from trm.eval.metrics import compute_metrics
 from trm.model.trm_mlp import TRMMLP
@@ -41,6 +42,7 @@ def _load_model_from_checkpoint(path: Path, tiny: bool) -> tuple[TRMMLP, ModelCo
 
 
 def train_cmd(args: argparse.Namespace) -> None:
+    """Train TRM-MLP with optional per-epoch validation."""
     model_cfg = tiny_model_config() if args.tiny else ModelConfig()
     train_cfg = tiny_train_config() if args.tiny else TrainConfig()
 
@@ -56,13 +58,33 @@ def train_cmd(args: argparse.Namespace) -> None:
         model_cfg = model_cfg.model_copy(update={'T': args.T})
     if args.max_steps is not None:
         model_cfg = model_cfg.model_copy(update={'max_supervision_steps': args.max_steps})
+    if args.val_size is not None:
+        train_cfg = train_cfg.model_copy(update={'val_size': args.val_size})
+    if args.split_seed is not None:
+        train_cfg = train_cfg.model_copy(update={'split_seed': args.split_seed})
 
+    validate = not args.no_validate
     device = _resolve_device()
     logger.info('Device: %s', device)
 
     ds = SudokuDataset()
-    train_df = ds.load_split('train', n_samples=train_cfg.train_size)
-    logger.info('Train puzzles: %d', len(train_df))
+    val_loader = None
+    if validate:
+        n_load = train_cfg.train_size + train_cfg.val_size
+        df = ds.load_split('train', n_samples=n_load)
+        val_n = resolve_val_size(len(df), train_cfg.val_size)
+        train_df, val_df = split_train_val(df, val_size=val_n, seed=train_cfg.split_seed)
+        logger.info('Train puzzles: %d | Val holdout: %d', len(train_df), len(val_df))
+        val_loader = DataLoader(
+            SudokuTorchDataset(val_df),
+            batch_size=train_cfg.batch_size,
+            shuffle=False,
+            num_workers=train_cfg.num_workers,
+            pin_memory=train_cfg.pin_memory and device.type == 'cuda',
+        )
+    else:
+        train_df = ds.load_split('train', n_samples=train_cfg.train_size)
+        logger.info('Train puzzles: %d (validation disabled)', len(train_df))
 
     train_loader = DataLoader(
         SudokuTorchDataset(train_df),
@@ -76,11 +98,12 @@ def train_cmd(args: argparse.Namespace) -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{n_params:,}')
 
-    trainer = Trainer(model, train_loader, model_cfg, train_cfg, device)
+    trainer = Trainer(model, train_loader, model_cfg, train_cfg, device, val_loader=val_loader, validate=validate)
     trainer.train()
 
 
 def eval_cmd(args: argparse.Namespace) -> None:
+    """Evaluate a checkpoint on the HF test split."""
     device = _resolve_device()
     checkpoint = Path(args.checkpoint)
     model, _ = _load_model_from_checkpoint(checkpoint, tiny=args.tiny)
@@ -120,6 +143,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """CLI entry for ``train`` and ``eval`` subcommands."""
     parser = argparse.ArgumentParser(description='TRM-MLP Sudoku (sapientinc/sudoku-extreme)')
     sub = parser.add_subparsers(dest='command', required=True)
 
@@ -131,6 +155,13 @@ def main() -> None:
     train_parser.add_argument('--n', type=int, help='Latent recursion depth n (paper default 6)')
     train_parser.add_argument('--T', type=int, help='Deep recursion outer steps T (paper default 3)')
     train_parser.add_argument('--max-steps', type=int, help='Deep supervision steps N_sup (paper default 16)')
+    train_parser.add_argument('--val-size', type=int, help='Validation holdout from HF train head (default 500)')
+    train_parser.add_argument('--split-seed', type=int, help='Random seed for train/val split')
+    train_parser.add_argument(
+        '--no-validate',
+        action='store_true',
+        help='Skip validation loop and val/* W&B metrics each epoch',
+    )
 
     eval_parser = sub.add_parser('eval', help='Evaluate on HF test split')
     eval_parser.add_argument('--checkpoint', type=str, required=True)

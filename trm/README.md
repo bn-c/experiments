@@ -114,11 +114,12 @@ uv run pytest
 Training metrics are logged to [Weights & Biases](https://wandb.ai) when `WANDB_API_KEY` (and project/entity) are set in `.env`:
 
 - Per-step: `train/loss` (deep-supervision sum per batch)
-- Per-epoch: `train/epoch_loss`
+- Per-epoch: `train/epoch_loss`, `train/epoch_cell_accuracy`, `train/epoch_puzzle_accuracy` (EMA inference on the train split)
+- Per-epoch validation (unless `--no-validate`): `val/cell_accuracy`, `val/puzzle_accuracy` on a deterministic holdout from the HF train head (`val_size`, default 500)
 - `checkpoints/checkpoint.last.pt` rewritten after **each** epoch
 - Final checkpoint uploaded as a W&B model artifact when a run is active
 
-Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
+Eval and epoch accuracies use EMA shadow weights (same as `eval` checkpoint loading). Runs are named `trm-sudoku-<UTC timestamp>`. Without W&B credentials, training proceeds unchanged.
 
 ## References
 

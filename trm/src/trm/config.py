@@ -49,6 +49,8 @@ class TrainConfig(BaseSettings):
     pin_memory: bool = False
     checkpoint_dir: Path = Path('checkpoints')
     seed: int = 42
+    val_size: int = Field(default=500, description='Validation holdout count from HF train head')
+    split_seed: int = Field(default=42, description='Seed for deterministic train/val split')
 
     model_config = SettingsConfigDict(env_prefix='TRM_TRAIN_')
 
@@ -60,4 +62,4 @@ def tiny_model_config() -> ModelConfig:
 
 def tiny_train_config() -> TrainConfig:
     """Small batch / few samples for smoke training."""
-    return TrainConfig(batch_size=4, epochs=1, train_size=32)
+    return TrainConfig(batch_size=4, epochs=1, train_size=32, val_size=8)
