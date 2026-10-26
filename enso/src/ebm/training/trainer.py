@@ -24,6 +24,7 @@ from ebm.training.metrics import (
     compute_z_variance,
     finish_wandb,
     init_wandb,
+    format_train_postfix,
     log_train_step,
     log_validation,
     upload_checkpoint_to_wandb,
@@ -280,11 +281,10 @@ class Trainer:
             lr = float(self.scheduler.get_last_lr()[0])
             log_train_step(loss_out, lr, momentum, self.global_step)
 
-            loss_val = loss_out.total.item()
-            total_loss += loss_val
+            total_loss += loss_out.total.item()
             n_batches += 1
             self.global_step += 1
-            batch_bar.set_postfix(loss=f'{loss_val:.4f}', refresh=False)
+            batch_bar.set_postfix(**format_train_postfix(loss_out), refresh=False)
 
             self._save_last_if_due(epoch, n_batches)
 
