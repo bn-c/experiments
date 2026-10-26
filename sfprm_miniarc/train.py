@@ -30,6 +30,7 @@ from data.dataset import (  # noqa: E402
     build_cache,
     make_train_indices,
 )
+from eval_vote_augs import eval_vote_augs  # noqa: E402
 from models.ema import EMAModel  # noqa: E402
 from models.sfprm_core import (  # noqa: E402
     DEFAULT_D_FF,
@@ -400,17 +401,39 @@ def train(args: argparse.Namespace) -> None:
         do_eval = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.steps)
         if do_eval:
             eval_model = ema.shadow if ema is not None else model
-            pas, mean_halt = eval_pass_at_1(
+            # One pass: 1-shot (unaug) + D₄×color vote (paper B.1)
+            vote = eval_vote_augs(
                 eval_model,
-                eval_cache,
+                data_dir,
+                device=device,
+                max_seq_len=args.max_seq_len,
+                n_color_perms=args.n_color_perms,
+                aug_batch=args.vote_aug_batch,
+                seed=args.seed,
                 tau=args.tau,
                 max_loops=args.max_loops,
-                gamma_eval=args.gamma_eval,
-                device=device,
+                gamma=args.gamma_eval,
+                max_tasks=args.max_tasks,
+                show_progress=True,
             )
-            print(f"\n[step {step}] eval Pass@1={pas:.4f} mean_halt={mean_halt:.1f}")
+            pas = vote.unaug_pass_at_1
+            mean_halt = vote.unaug_mean_halt
+            print(
+                f"\n[step {step}] eval 1-shot Pass@1={pas:.4f} mean_halt={mean_halt:.1f} | "
+                f"vote Pass@1={vote.vote_pass_at_1:.4f} "
+                f"mean_halt/aug={vote.vote_mean_halt_per_aug:.1f} "
+                f"(wall {vote.wall_s:.0f}s)"
+            )
             if wandb_on:
-                wandb.log({"eval/pass_at_1": pas, "eval/mean_halt_steps": mean_halt}, step=step)
+                wandb.log(
+                    {
+                        "eval/pass_at_1": pas,
+                        "eval/vote_pass_at_1": vote.vote_pass_at_1,
+                        "eval/mean_halt_steps": mean_halt,
+                        "eval/vote_mean_halt_steps": vote.vote_mean_halt_per_aug,
+                    },
+                    step=step,
+                )
             if pas >= best_pass:
                 best_pass = pas
                 torch.save(
@@ -419,6 +442,7 @@ def train(args: argparse.Namespace) -> None:
                         "ema": ema.state_dict() if ema is not None else None,
                         "step": step,
                         "pass_at_1": pas,
+                        "vote_pass_at_1": vote.vote_pass_at_1,
                         "args": vars(args),
                         "num_params": n_params,
                     },
@@ -501,6 +525,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=500)
+    p.add_argument(
+        "--vote_aug_batch",
+        type=int,
+        default=64,
+        help="Augs per GPU batch during vote eval (default 64 = all D4×8 color)",
+    )
     p.add_argument("--ckpt_every", type=int, default=1000)
     # Solver / halt (paper)
     p.add_argument("--tau", type=float, default=0.01)

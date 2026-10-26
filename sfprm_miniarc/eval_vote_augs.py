@@ -12,10 +12,12 @@ Also reports paper-halt diagnostics (τ / η-floor / max_iter cap).
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -147,6 +149,144 @@ def classify_halt(
     return c
 
 
+@dataclass(frozen=True)
+class VoteEvalResult:
+    """1-shot (unaug) + vote-over-augs Pass@1 and halt stats."""
+
+    n: int
+    unaug_pass_at_1: float
+    vote_pass_at_1: float
+    unaug_mean_halt: float
+    vote_mean_halt_per_aug: float
+    halt_reasons: dict[str, int]
+    wall_s: float
+
+
+@torch.no_grad()
+def eval_vote_augs(
+    model,
+    data_dir: Path | str,
+    *,
+    device: torch.device,
+    max_seq_len: int = PAPER_SEQ_LEN,
+    n_color_perms: int = 8,
+    aug_batch: int = 64,
+    seed: int = 0,
+    tau: float = 0.01,
+    max_loops: int = 200,
+    gamma: float = 0.9,
+    max_tasks: int | None = None,
+    log_every: int = 10,
+    show_progress: bool = True,
+) -> VoteEvalResult:
+    """Run unaugmented + D₄×color vote Pass@1 (paper B.1).
+
+    Index 0 of each task's aug batch is always (d4=0, identity) → 1-shot.
+    """
+    model.eval()
+    use_amp = device.type == "cuda"
+    files = list_task_files(Path(data_dir))
+    if max_tasks is not None:
+        files = files[:max_tasks]
+
+    rng = random.Random(seed)
+    identity = np.arange(NUM_COLORS, dtype=np.int64)
+
+    unaug_hits = 0
+    vote_hits = 0
+    unaug_halt = 0
+    vote_halt_sum = 0
+    vote_halt_n = 0
+    halt_reasons: Counter = Counter()
+
+    t0 = time.perf_counter()
+    iterator = enumerate(files)
+    if show_progress:
+        iterator = enumerate(tqdm(files, desc="vote-eval", dynamic_ncols=True))
+
+    for puzzle_id, path in iterator:
+        task = load_task_json(path)
+
+        # D₄ × color perms; index 0 is always (d4=0, identity) → unaugmented / 1-shot
+        perms = [identity] + [random_color_perm(rng) for _ in range(n_color_perms - 1)]
+        aug_meta: list[tuple[int, np.ndarray]] = []
+        tok_list: list[np.ndarray] = []
+        tgt_list: list[np.ndarray] = []
+        mask_list: list[np.ndarray] = []
+        for d4_k in range(8):
+            for perm in perms:
+                _demos_a, q_in_a, q_out_a = _transform_task(task, d4_k, perm)
+                tok_a, tgt_a, mask_a = pack_demo_pair(
+                    q_in_a, q_out_a, max_seq_len=max_seq_len
+                )
+                tok_list.append(tok_a)
+                tgt_list.append(tgt_a)
+                mask_list.append(mask_a)
+                aug_meta.append((d4_k, perm))
+
+        canon_gt = _transform_task(task, 0, identity)[2].reshape(-1)
+        canon_preds: list[np.ndarray] = []
+        unaug_exact = False
+        unaug_steps = 0
+
+        for start in range(0, len(tok_list), aug_batch):
+            end = min(start + aug_batch, len(tok_list))
+            n_b = end - start
+            preds_b, steps_b, residual_b, eta_b, exact_b = run_batch(
+                model,
+                np.stack(tok_list[start:end]),
+                np.stack(tgt_list[start:end]),
+                np.stack(mask_list[start:end]),
+                np.full(n_b, puzzle_id, dtype=np.int64),
+                device=device,
+                tau=tau,
+                max_loops=max_loops,
+                gamma=gamma,
+                use_amp=use_amp,
+            )
+            halt_reasons.update(
+                classify_halt(
+                    steps_b, residual_b, eta_b, tau=tau, eta_min=0.001, max_loops=max_loops
+                )
+            )
+            for j, pred_a in enumerate(preds_b):
+                idx = start + j
+                d4_k, perm = aug_meta[idx]
+                if idx == 0:
+                    unaug_exact = bool(exact_b[j])
+                    unaug_steps = int(steps_b[j])
+                canon_preds.append(canonicalize_pred(pred_a, d4_k, perm))
+                vote_halt_sum += int(steps_b[j])
+                vote_halt_n += 1
+
+        unaug_hits += int(unaug_exact)
+        unaug_halt += unaug_steps
+        voted = majority_vote(canon_preds)
+        vote_hits += int(np.array_equal(voted, canon_gt))
+
+        done = puzzle_id + 1
+        if show_progress and (done % log_every == 0 or done == len(files)):
+            print(
+                f"\n[{done}/{len(files)}] "
+                f"unaug={unaug_hits / done:.4f} vote={vote_hits / done:.4f} "
+                f"mean_halt_unaug={unaug_halt / done:.1f} "
+                f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.1f} "
+                f"halt_reasons={dict(halt_reasons)}",
+                flush=True,
+            )
+
+    n = len(files)
+    return VoteEvalResult(
+        n=n,
+        unaug_pass_at_1=unaug_hits / max(n, 1),
+        vote_pass_at_1=vote_hits / max(n, 1),
+        unaug_mean_halt=unaug_halt / max(n, 1),
+        vote_mean_halt_per_aug=vote_halt_sum / max(vote_halt_n, 1),
+        halt_reasons=dict(halt_reasons),
+        wall_s=time.perf_counter() - t0,
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=str, required=True)
@@ -172,10 +312,13 @@ def main() -> int:
     p.add_argument("--max_tasks", type=int, default=None)
     p.add_argument("--no_ema", action="store_true")
     p.add_argument("--log_every", type=int, default=10)
+    p.add_argument("--wandb-project", type=str, default="sfprm-miniarc")
+    p.add_argument("--wandb-entity", type=str, default=None)
+    p.add_argument("--wandb", action="store_true", default=None)
+    p.add_argument("--no-wandb", action="store_true")
     args = p.parse_args()
 
     device = resolve_device(args.device)
-    use_amp = device.type == "cuda"
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     ns = argparse.Namespace(
         d_model=384,
@@ -188,109 +331,68 @@ def main() -> int:
     )
     model = _build_model_from_ckpt(ckpt, ns, device)
     args.max_seq_len = ns.max_seq_len
-    model.eval()
 
-    files = list_task_files(Path(args.data_dir))
-    if args.max_tasks is not None:
-        files = files[: args.max_tasks]
+    result = eval_vote_augs(
+        model,
+        args.data_dir,
+        device=device,
+        max_seq_len=args.max_seq_len,
+        n_color_perms=args.n_color_perms,
+        aug_batch=args.aug_batch,
+        seed=args.seed,
+        tau=args.tau,
+        max_loops=args.max_loops,
+        gamma=args.gamma,
+        max_tasks=args.max_tasks,
+        log_every=args.log_every,
+    )
 
-    rng = random.Random(args.seed)
-    identity = np.arange(NUM_COLORS, dtype=np.int64)
-
-    unaug_hits = 0
-    vote_hits = 0
-    unaug_halt = 0
-    vote_halt_sum = 0
-    vote_halt_n = 0
-    halt_reasons: Counter = Counter()
-
-    t0 = time.perf_counter()
-    for puzzle_id, path in enumerate(tqdm(files, desc="vote-eval", dynamic_ncols=True)):
-        task = load_task_json(path)
-
-        # D₄ × color perms; index 0 is always (d4=0, identity) → unaugmented
-        perms = [identity] + [random_color_perm(rng) for _ in range(args.n_color_perms - 1)]
-        aug_meta: list[tuple[int, np.ndarray]] = []
-        tok_list: list[np.ndarray] = []
-        tgt_list: list[np.ndarray] = []
-        mask_list: list[np.ndarray] = []
-        for d4_k in range(8):
-            for perm in perms:
-                _demos_a, q_in_a, q_out_a = _transform_task(task, d4_k, perm)
-                tok_a, tgt_a, mask_a = pack_demo_pair(
-                    q_in_a, q_out_a, max_seq_len=args.max_seq_len
-                )
-                tok_list.append(tok_a)
-                tgt_list.append(tgt_a)
-                mask_list.append(mask_a)
-                aug_meta.append((d4_k, perm))
-
-        canon_gt = _transform_task(task, 0, identity)[2].reshape(-1)
-        canon_preds: list[np.ndarray] = []
-        unaug_exact = False
-        unaug_steps = 0
-
-        for start in range(0, len(tok_list), args.aug_batch):
-            end = min(start + args.aug_batch, len(tok_list))
-            n = end - start
-            preds_b, steps_b, residual_b, eta_b, exact_b = run_batch(
-                model,
-                np.stack(tok_list[start:end]),
-                np.stack(tgt_list[start:end]),
-                np.stack(mask_list[start:end]),
-                np.full(n, puzzle_id, dtype=np.int64),
-                device=device,
-                tau=args.tau,
-                max_loops=args.max_loops,
-                gamma=args.gamma,
-                use_amp=use_amp,
-            )
-            halt_reasons.update(
-                classify_halt(
-                    steps_b, residual_b, eta_b, tau=args.tau, eta_min=0.001, max_loops=args.max_loops
-                )
-            )
-            for j, pred_a in enumerate(preds_b):
-                idx = start + j
-                d4_k, perm = aug_meta[idx]
-                if idx == 0:
-                    # (d4=0, identity) — unaugmented Pass@1 / halt from same batch
-                    unaug_exact = bool(exact_b[j])
-                    unaug_steps = int(steps_b[j])
-                canon_preds.append(canonicalize_pred(pred_a, d4_k, perm))
-                vote_halt_sum += int(steps_b[j])
-                vote_halt_n += 1
-
-        unaug_hits += int(unaug_exact)
-        unaug_halt += unaug_steps
-        voted = majority_vote(canon_preds)
-        vote_hits += int(np.array_equal(voted, canon_gt))
-
-        done = puzzle_id + 1
-        if done % args.log_every == 0 or done == len(files):
-            print(
-                f"\n[{done}/{len(files)}] "
-                f"unaug={unaug_hits / done:.4f} vote={vote_hits / done:.4f} "
-                f"mean_halt_unaug={unaug_halt / done:.1f} "
-                f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.1f} "
-                f"halt_reasons={dict(halt_reasons)}",
-                flush=True,
-            )
-
-    wall = time.perf_counter() - t0
-    n = len(files)
     n_augs = 8 * args.n_color_perms
     print(f"checkpoint: {Path(args.checkpoint).resolve()}")
     print(f"ckpt_step={ckpt.get('step')} ckpt_pass_at_1={ckpt.get('pass_at_1')} ema={bool(ckpt.get('ema'))}")
     print(f"script={Path(__file__).resolve()}")
-    print(f"tasks={n} augs_per_task={n_augs} (8 D4 × {args.n_color_perms} color) aug_batch={args.aug_batch}")
-    print(f"unaug Pass@1: {unaug_hits / n:.4f} ({unaug_hits}/{n})  mean_halt={unaug_halt / n:.2f}")
     print(
-        f"vote  Pass@1: {vote_hits / n:.4f} ({vote_hits}/{n})  "
-        f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.2f}"
+        f"tasks={result.n} augs_per_task={n_augs} "
+        f"(8 D4 × {args.n_color_perms} color) aug_batch={args.aug_batch}"
     )
-    print(f"paper_halt_reasons (all aug forwards): {dict(halt_reasons)}")
-    print(f"wall_s={wall:.1f}")
+    print(
+        f"unaug Pass@1: {result.unaug_pass_at_1:.4f}  mean_halt={result.unaug_mean_halt:.2f}"
+    )
+    print(
+        f"vote  Pass@1: {result.vote_pass_at_1:.4f}  "
+        f"mean_halt_per_aug={result.vote_mean_halt_per_aug:.2f}"
+    )
+    print(f"paper_halt_reasons (all aug forwards): {result.halt_reasons}")
+    print(f"wall_s={result.wall_s:.1f}")
+
+    use_wandb = args.wandb
+    if args.no_wandb:
+        use_wandb = False
+    elif use_wandb is None:
+        use_wandb = bool(os.environ.get("WANDB_API_KEY"))
+    if use_wandb:
+        try:
+            import wandb
+        except ImportError:
+            print("wandb not installed; skipping W&B log")
+        else:
+            mode = "online" if os.environ.get("WANDB_API_KEY") else "offline"
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=f"sfprm-vote-eval-{Path(args.checkpoint).stem}",
+                mode=mode,
+                config={"checkpoint": args.checkpoint, **vars(args)},
+            )
+            wandb.log(
+                {
+                    "eval/pass_at_1": result.unaug_pass_at_1,
+                    "eval/vote_pass_at_1": result.vote_pass_at_1,
+                    "eval/mean_halt_steps": result.unaug_mean_halt,
+                    "eval/vote_mean_halt_steps": result.vote_mean_halt_per_aug,
+                }
+            )
+            wandb.finish()
     return 0
 
 
