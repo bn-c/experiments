@@ -58,7 +58,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--d-model", type=int, default=384, help="desk 16GB default; paper Mini-ARC uses 512")
     p.add_argument("--batch", type=int, default=64)
-    p.add_argument("--seq-len", type=int, default=128, help="latent sequence length (incl. puzzle emb if any)")
+    p.add_argument(
+        "--seq-len",
+        type=int,
+        default=26,
+        help="latent sequence length incl. puzzle emb (paper Mini-ARC: 25+1=26)",
+    )
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--device", type=str, default="cuda")

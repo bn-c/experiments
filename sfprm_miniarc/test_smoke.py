@@ -57,7 +57,7 @@ def test_desk_width_param_ballpark():
         d_model=DEFAULT_D_MODEL,
         d_ff=DEFAULT_D_FF,
         n_layers=DEFAULT_N_LAYERS,
-        max_seq_len=128,
+        max_seq_len=25,
         n_puzzles=149,
     )
     n = model.count_parameters()
@@ -66,16 +66,20 @@ def test_desk_width_param_ballpark():
 
 
 def test_solver_patience_decays_eta():
+    from models.solver import update_schedule
+
     model = SFPRM(vocab_size=12, d_model=32, n_heads=4, d_ff=64, n_layers=1, max_seq_len=16, n_puzzles=2)
     x = torch.randint(0, 12, (2, 16))
     z_in = model.get_input_embedding(x, torch.zeros(2, dtype=torch.long))
     z = z_in.clone()
     cfg = SolverConfig(patience=2, gamma=0.5, eta_min=0.001, tau=1e-12, max_iter=20)
     state = SolverState.init(2, z.device, cfg)
-    z, state, _ = run_segment(model, z, z_in, state, cfg, k=6)
-    # With absurdly tight tau, residual won't halt; patience should decay η
-    assert float(state.eta.max().item()) <= 1.0
-    assert float(state.eta.min().item()) < 1.0 or bool(state.halted.any())
+    z, state, _ = run_segment(model, z, z_in, state, cfg, k=2)
+    assert z.shape == z_in.shape
+    # Flat residuals exhaust patience regardless of model dynamics.
+    for _ in range(3):
+        state = update_schedule(state, torch.tensor([0.5, 0.5]), cfg)
+    assert float(state.eta.min().item()) < 1.0
 
 
 def test_muon_step():

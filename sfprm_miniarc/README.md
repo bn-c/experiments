@@ -12,11 +12,25 @@ Table 3, scaled for a **1×16GB GPU** desk run.
 | L_layers | 2 | 2 |
 | SwiGLU, RoPE, causal conv k=4 | yes | yes |
 | puzzle-emb length | 1 | 1 |
-| vocab / packing | 12 / seq 25 | 12 / **packed demos+query ≤128** (desk) |
+| vocab / sequence | 12 / **seq 25** (demo-pair I→O) | 12 / **seq 25** (`--pack_mode demo_pair`) |
 | trainable params | 6.83M (listed) | **~4.79M** (counted; 512-wide SwiGLU×2L ≈8.48M) |
 
 Paper ratios kept (heads=8, MLP×4, L=2); width scaled so batch 512 + BPTT K=6 +
 carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have headroom.
+
+### Sequence layout (before → after)
+
+| | Before (EX-33 packed) | After (default, paper) |
+| --- | --- | --- |
+| Mode | `--pack_mode packed` | `--pack_mode demo_pair` |
+| Tokens | demos `in‖out` + query_in, PAD ≤128 | flatten(input) only, length **25** |
+| Targets | query_out at query positions | flatten(output) on all 25 cells |
+| Train rows | 1 packed sample / task×aug | **1 sample / demo-pair×aug** |
+| Eval rows | packed demos+test query | test I→O only (25) |
+
+Legacy packed path is kept: `--pack_mode packed --max_seq_len 128`.
+Old EX-33 checkpoints are inferred as packed when `max_seq_len>25` and no
+`pack_mode` was saved.
 
 ## Paper knobs matched
 
@@ -26,18 +40,13 @@ carry bank fit ~16GB. Override with `--d_model 512 --d_ff 2048` if you have head
 - **Reg:** weight drop 0.05, variational drop 0.2, EMA 0.999, Q-head loss 0.5,
   λ init **0.1**
 - **Optim:** Muon lr **5e-3**, weight decay **0.1**, AdamW 1e-3, puzzle-emb lr/wd **1e-2 / 0**
+- **Sequence:** demo-pair seq-25 + puzzle emb (train on demos; eval / vote on test)
 
 ## Desk knobs kept (intentionally not paper)
 
 - Steps **12,000** (paper ~68,993)
-- Aug **149×64** via D₄×`n_color_perms=8` + current packing (paper 149×100, seq 25)
-
-## Remaining gaps vs paper
-
-- Packed multi-demo context (len≤128) vs paper’s 25-cell + emb formulation (PAD slots are masked in attn + chordal residual)
-- Width 384 vs paper 512 (16GB); full-width flag available
-- Global batch 512 vs paper 768
-- γ_eval=0.9 (paper Mini-ARC train/eval both 0.9) — OK; Sudoku uses 0.99 at eval
+- Aug **D₄×`n_color_perms=8`** (=64; paper 100×)
+- Width 384 vs paper 512; global batch 512 vs paper 768
 
 ## Layout
 
@@ -74,6 +83,7 @@ pip install -r requirements.txt
 ./run.sh --smoke          # CPU-friendly
 ./run.sh                  # full 12k (needs ≥16GB GPU)
 # optional: python train.py --compile  # torch.compile on model.step (default off)
+# legacy packing: python train.py --pack_mode packed --max_seq_len 128
 ```
 
 Eval:
@@ -81,6 +91,8 @@ Eval:
 ```bash
 python evaluate.py --checkpoint ./checkpoints/model_best.pt --tau 0.01 --max_loops 200
 python eval_vote_augs.py --checkpoint ./checkpoints/model_best.pt   # vote-over-augs
+# EX-33 packed ckpt (auto-inferred if max_seq_len=128 in args):
+#   python evaluate.py --checkpoint ... --pack_mode packed --max_seq_len 128
 ```
 
 ### `torch.compile` microbench
@@ -89,7 +101,7 @@ One-off timing of paper `SFPRM.step(z, z_input, eta)` (static shapes, `no_grad` 
 
 ```bash
 cd sfprm_miniarc
-python scripts/bench_compile.py --batch 64 --d-model 384
+python scripts/bench_compile.py --batch 64 --d-model 384 --seq-len 26
 ```
 
 Desk ROCm 7.1 (baseline tree, pre-paper API) saw ~2.1–2.4×; re-run after the paper `step` signature change before citing numbers.

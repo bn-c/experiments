@@ -27,11 +27,15 @@ sys.path.insert(0, str(ROOT))
 
 from data.dataset import (  # noqa: E402
     CELLS,
+    DEFAULT_PACK_MODE,
     GRID,
     NUM_COLORS,
+    PACK_MODE_DEMO_PAIR,
     _transform_task,
+    default_max_seq_len,
     list_task_files,
     load_task_json,
+    pack_demo_pair,
     pack_sequence,
     random_color_perm,
 )
@@ -161,12 +165,26 @@ def main() -> int:
     p.add_argument("--tau", type=float, default=0.01)
     p.add_argument("--max_loops", type=int, default=200)
     p.add_argument("--gamma", type=float, default=0.9)
-    p.add_argument("--max_seq_len", type=int, default=128)
+    p.add_argument(
+        "--pack_mode",
+        type=str,
+        choices=["demo_pair", "packed"],
+        default=DEFAULT_PACK_MODE,
+        help="Must match train packing. Legacy ckpts: --pack_mode packed --max_seq_len 128",
+    )
+    p.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=None,
+        help="Token length (default: 25 for demo_pair, 128 for packed; overridden by ckpt args)",
+    )
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--max_tasks", type=int, default=None)
     p.add_argument("--no_ema", action="store_true")
     p.add_argument("--log_every", type=int, default=10)
     args = p.parse_args()
+    if args.max_seq_len is None:
+        args.max_seq_len = default_max_seq_len(args.pack_mode)
 
     device = resolve_device(args.device)
     use_amp = device.type == "cuda"
@@ -177,10 +195,14 @@ def main() -> int:
         d_ff=1536,
         n_layers=2,
         max_seq_len=args.max_seq_len,
+        pack_mode=args.pack_mode,
         puzzle_emb_len=1,
         use_ema=not args.no_ema,
     )
     model = _build_model_from_ckpt(ckpt, ns, device)
+    # _build_model_from_ckpt may rewrite pack_mode / max_seq_len from ckpt args.
+    args.max_seq_len = ns.max_seq_len
+    args.pack_mode = ns.pack_mode
     model.eval()
 
     files = list_task_files(Path(args.data_dir))
@@ -210,9 +232,14 @@ def main() -> int:
         for d4_k in range(8):
             for perm in perms:
                 demos_a, q_in_a, q_out_a = _transform_task(task, d4_k, perm)
-                tok_a, tgt_a, mask_a = pack_sequence(
-                    demos_a, q_in_a, q_out_a, max_seq_len=args.max_seq_len
-                )
+                if args.pack_mode == PACK_MODE_DEMO_PAIR:
+                    tok_a, tgt_a, mask_a = pack_demo_pair(
+                        q_in_a, q_out_a, max_seq_len=args.max_seq_len
+                    )
+                else:
+                    tok_a, tgt_a, mask_a = pack_sequence(
+                        demos_a, q_in_a, q_out_a, max_seq_len=args.max_seq_len
+                    )
                 tok_list.append(tok_a)
                 tgt_list.append(tgt_a)
                 mask_list.append(mask_a)
