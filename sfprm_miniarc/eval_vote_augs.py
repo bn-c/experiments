@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Unaugmented + D₄×color vote-over-augs Pass@1 (paper B.1) with chordal halt.
 
-Predictions are inverse-transformed to canonical space, then per-cell majority vote.
+For each task, all D₄×color augs (default 8×8=64) are packed into one GPU batch
+and solved in a single chordal-halt loop. Predictions are inverse-transformed to
+canonical space, then per-cell majority vote. The (d4=0, identity-perm) sample
+in that batch is also scored as unaugmented Pass@1 (no extra forward).
+
 Also reports paper-halt diagnostics (τ / η-floor / max_iter cap).
 """
 
@@ -147,7 +151,12 @@ def main() -> int:
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--data_dir", type=str, default=str(ROOT / "data" / "mini_arc"))
     p.add_argument("--n_color_perms", type=int, default=8, help="D₄×this augs (desk train=8→64)")
-    p.add_argument("--aug_batch", type=int, default=16, help="Augs solved per GPU forward")
+    p.add_argument(
+        "--aug_batch",
+        type=int,
+        default=64,
+        help="Augs per GPU chordal-halt loop (default 64 = all D4×8 color in one batch)",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tau", type=float, default=0.01)
     p.add_argument("--max_loops", type=int, default=200)
@@ -192,29 +201,7 @@ def main() -> int:
     for puzzle_id, path in enumerate(tqdm(files, desc="vote-eval", dynamic_ncols=True)):
         task = load_task_json(path)
 
-        # --- unaugmented ---
-        demos, q_in, q_out = _transform_task(task, 0, identity)
-        tok, tgt, mask = pack_sequence(demos, q_in, q_out, max_seq_len=args.max_seq_len)
-        preds, steps, residual, eta, exact = run_batch(
-            model,
-            tok[None],
-            tgt[None],
-            mask[None],
-            np.asarray([puzzle_id], dtype=np.int64),
-            device=device,
-            tau=args.tau,
-            max_loops=args.max_loops,
-            gamma=args.gamma,
-            use_amp=use_amp,
-        )
-        unaug_hits += int(exact[0])
-        unaug_halt += int(steps[0])
-        halt_reasons.update(
-            classify_halt(steps, residual, eta, tau=args.tau, eta_min=0.001, max_loops=args.max_loops)
-        )
-        canon_gt = q_out.reshape(-1)
-
-        # --- vote augs: D₄ × color perms (include identity) ---
+        # D₄ × color perms; index 0 is always (d4=0, identity) → unaugmented
         perms = [identity] + [random_color_perm(rng) for _ in range(args.n_color_perms - 1)]
         aug_meta: list[tuple[int, np.ndarray]] = []
         tok_list: list[np.ndarray] = []
@@ -231,11 +218,15 @@ def main() -> int:
                 mask_list.append(mask_a)
                 aug_meta.append((d4_k, perm))
 
+        canon_gt = _transform_task(task, 0, identity)[2].reshape(-1)
         canon_preds: list[np.ndarray] = []
+        unaug_exact = False
+        unaug_steps = 0
+
         for start in range(0, len(tok_list), args.aug_batch):
             end = min(start + args.aug_batch, len(tok_list))
             n = end - start
-            preds_b, steps_b, residual_b, eta_b, _ = run_batch(
+            preds_b, steps_b, residual_b, eta_b, exact_b = run_batch(
                 model,
                 np.stack(tok_list[start:end]),
                 np.stack(tgt_list[start:end]),
@@ -253,11 +244,18 @@ def main() -> int:
                 )
             )
             for j, pred_a in enumerate(preds_b):
-                d4_k, perm = aug_meta[start + j]
+                idx = start + j
+                d4_k, perm = aug_meta[idx]
+                if idx == 0:
+                    # (d4=0, identity) — unaugmented Pass@1 / halt from same batch
+                    unaug_exact = bool(exact_b[j])
+                    unaug_steps = int(steps_b[j])
                 canon_preds.append(canonicalize_pred(pred_a, d4_k, perm))
                 vote_halt_sum += int(steps_b[j])
                 vote_halt_n += 1
 
+        unaug_hits += int(unaug_exact)
+        unaug_halt += unaug_steps
         voted = majority_vote(canon_preds)
         vote_hits += int(np.array_equal(voted, canon_gt))
 
@@ -267,6 +265,7 @@ def main() -> int:
                 f"\n[{done}/{len(files)}] "
                 f"unaug={unaug_hits / done:.4f} vote={vote_hits / done:.4f} "
                 f"mean_halt_unaug={unaug_halt / done:.1f} "
+                f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.1f} "
                 f"halt_reasons={dict(halt_reasons)}",
                 flush=True,
             )
@@ -274,15 +273,16 @@ def main() -> int:
     wall = time.perf_counter() - t0
     n = len(files)
     n_augs = 8 * args.n_color_perms
-    print(f"checkpoint: {args.checkpoint}")
-    print(f"ckpt_step={ckpt.get('step')} ckpt_pass_at_1={ckpt.get('pass_at_1')}")
+    print(f"checkpoint: {Path(args.checkpoint).resolve()}")
+    print(f"ckpt_step={ckpt.get('step')} ckpt_pass_at_1={ckpt.get('pass_at_1')} ema={bool(ckpt.get('ema'))}")
+    print(f"script={Path(__file__).resolve()}")
     print(f"tasks={n} augs_per_task={n_augs} (8 D4 × {args.n_color_perms} color) aug_batch={args.aug_batch}")
     print(f"unaug Pass@1: {unaug_hits / n:.4f} ({unaug_hits}/{n})  mean_halt={unaug_halt / n:.2f}")
     print(
         f"vote  Pass@1: {vote_hits / n:.4f} ({vote_hits}/{n})  "
         f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.2f}"
     )
-    print(f"paper_halt_reasons (all unaug+aug forwards): {dict(halt_reasons)}")
+    print(f"paper_halt_reasons (all aug forwards): {dict(halt_reasons)}")
     print(f"wall_s={wall:.1f}")
     return 0
 
