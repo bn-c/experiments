@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from linear_bench.data import HF_PRESETS, REGISTRY
 from linear_bench.train import train_one, write_metrics
 
 
@@ -54,3 +57,31 @@ def test_mnist1d_synthetic_smoke():
     metrics = train_one(cfg)
     assert metrics["primary_metric"] == "acc"
     assert 0.0 <= float(metrics["primary_value"]) <= 1.0
+
+
+def test_hf_presets_registered():
+    for name in ("cifar10", "cifar100", "mnist", "svhn", "stl10", "fashion_mnist", "hf"):
+        assert name in REGISTRY
+    assert set(HF_PRESETS) >= {"cifar10", "cifar100", "mnist", "svhn", "stl10"}
+
+
+@pytest.mark.parametrize("dataset", ["mnist", "cifar10"])
+def test_hf_domain_smoke(dataset: str):
+    """Real HF download+train on ≥2 domains; tiny subsets keep it CPU-fast."""
+    cfg = {
+        "dataset": dataset,
+        "data": {"max_train": 64, "max_test": 32},
+        "model": {"name": "linear"},
+        "epochs": 1,
+        "batch_size": 32,
+        "lr": 0.05,
+        "seed": 0,
+        "device": "cpu",
+    }
+    metrics = train_one(cfg)
+    assert metrics["meta"]["source"] == "huggingface"
+    assert metrics["meta"]["n_train"] == 64
+    assert metrics["meta"]["n_test"] == 32
+    assert metrics["primary_metric"] == "acc"
+    assert 0.0 <= float(metrics["primary_value"]) <= 1.0
+    assert metrics["n_params"] > 0

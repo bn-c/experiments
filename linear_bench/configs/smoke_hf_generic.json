@@ -1,0 +1,20 @@
+{
+  "dataset": "hf",
+  "data": {
+    "hf_path": "uoft-cs/cifar100",
+    "image_key": "img",
+    "label_key": "fine_label",
+    "n_classes": 100,
+    "max_train": 256,
+    "max_test": 64
+  },
+  "model": {
+    "name": "linear"
+  },
+  "epochs": 1,
+  "batch_size": 64,
+  "lr": 0.05,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/smoke_hf_generic.json"
+}
