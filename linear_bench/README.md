@@ -30,7 +30,8 @@ python -m linear_bench --config linear_bench/configs/smoke_hf_mnist.json --epoch
 
 Opt-in (default **off** — smoke/CI never need W&B). Same soft-import pattern as
 SFPRM: install `wandb` when you want logging; without `WANDB_API_KEY` runs go
-**offline** (local `wandb/` dir).
+**offline** (local `wandb/` dir). One project (`linear-bench`); filter by
+domain/model via run metadata — not separate projects.
 
 ```bash
 # flag
@@ -47,9 +48,19 @@ WANDB_API_KEY=… python -m linear_bench --config … --wandb --wandb-project li
 WANDB_MODE=offline python -m linear_bench --config … --wandb
 ```
 
-Logged: full config, `dataset`, `model_type`, `num_params`, per-epoch
-`train/loss`, `val/loss`, plus `val/acc` (classification) or `val/mse` (LRB).
-Default project: `linear-bench`.
+### How to read the dashboard
+
+| Axis | Value | Use |
+| --- | --- | --- |
+| **name** | `{dataset}-{model}` e.g. `mnist-linear` | Scan the run list |
+| **group** | dataset (`mnist`, `cifar10`, …) | Compare models within one domain |
+| **job_type** | model (`linear`, `mlp`) | Filter formulation |
+| **tags** | dataset, model, task, `seed-N` | Sidebar filters |
+| **config** | dataset, model, seed, task, hyperparams | Run detail / parallel coords |
+| **metrics** | `train/loss`, `val/loss`, `val/acc` or `val/mse` | Shared chart keys across runs |
+
+Domain and model live in name/tags/group/config — **not** as metric keys — so
+charts do not mix unrelated series. Default project: `linear-bench`.
 
 ## Baseline configs (not smoke)
 

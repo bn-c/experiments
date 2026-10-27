@@ -9,7 +9,7 @@ import pytest
 
 from linear_bench.data import HF_PRESETS, REGISTRY
 from linear_bench.train import train_one, write_metrics
-from linear_bench.wandb_util import resolve_wandb_enabled
+from linear_bench.wandb_util import resolve_wandb_enabled, run_name, run_tags
 
 
 def test_smoke_train_writes_metric(tmp_path: Path):
@@ -53,6 +53,17 @@ def test_wandb_resolve_default_off_and_cli_overrides():
     assert resolve_wandb_enabled({"wandb": True}, None, True) is False
     assert resolve_wandb_enabled({}, True, False) is True
     assert resolve_wandb_enabled({"wandb": False}, True, False) is True
+
+
+def test_wandb_run_name_and_tags():
+    assert run_name("mnist", "linear") == "mnist-linear"
+    assert run_name("cifar10", "mlp") == "cifar10-mlp"
+    assert run_tags(dataset="mnist", model="linear", task="classification", seed=0) == [
+        "mnist",
+        "linear",
+        "classification",
+        "seed-0",
+    ]
 
 
 def test_mnist1d_synthetic_offline_smoke():
