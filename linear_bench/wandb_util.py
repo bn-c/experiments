@@ -6,12 +6,13 @@ offline mode (local ``wandb/`` dir). ``--no-wandb`` / ``"wandb": false`` disable
 
 Dashboard UX (one project ``linear-bench``):
 
-- **name** ``{dataset}-{model}`` (readable run list)
+- **name** ``{dataset}-{model}`` for linear; ``{dataset}-mlp-{activation}``
+  for MLP (avoids activation collisions)
 - **group** = dataset (compare models within a domain)
 - **job_type** = model (filter linear vs mlp)
-- **tags** = dataset, model, task, ``seed-{n}``
+- **tags** = dataset, model, task, ``seed-{n}``, plus activation for MLP
 - **config** holds dataset / model / seed / task / hyperparams
-  (incl. ``optimizer``, ``weight_decay``)
+  (incl. ``optimizer``, ``weight_decay``, and flat ``activation`` for MLP)
 - **metrics** stay schema-only: ``train/loss``, ``train/acc``|``train/mse``,
   ``val/loss``, ``val/acc``|``val/mse``, ``time/epoch_sec`` (cumulative wall
   from train start), plus optional ``repr/*`` DoF probes — no domain/model
@@ -47,14 +48,36 @@ def resolve_wandb_enabled(cfg: dict[str, Any], cli_wandb: bool | None, cli_no_wa
     return False
 
 
-def run_name(dataset: str, model: str) -> str:
-    """Display name: ``{dataset}-{model}``."""
+def mlp_activation(cfg: dict[str, Any], model_name: str) -> str | None:
+    """Activation for MLP runs (default ``relu``); ``None`` for non-MLP."""
+    if model_name != "mlp":
+        return None
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict) and model_cfg.get("activation") is not None:
+        return str(model_cfg["activation"]).lower()
+    return "relu"
+
+
+def run_name(dataset: str, model: str, activation: str | None = None) -> str:
+    """Display name: ``{dataset}-linear`` or ``{dataset}-mlp-{activation}``."""
+    if model == "mlp" and activation:
+        return f"{dataset}-mlp-{activation}"
     return f"{dataset}-{model}"
 
 
-def run_tags(*, dataset: str, model: str, task: str, seed: int) -> list[str]:
-    """Stable filter tags (domain, model, task, seed)."""
-    return [dataset, model, task, f"seed-{seed}"]
+def run_tags(
+    *,
+    dataset: str,
+    model: str,
+    task: str,
+    seed: int,
+    activation: str | None = None,
+) -> list[str]:
+    """Stable filter tags (domain, model, task, seed, optional activation)."""
+    tags = [dataset, model, task, f"seed-{seed}"]
+    if activation:
+        tags.append(activation)
+    return tags
 
 
 def maybe_init_wandb(
@@ -79,17 +102,19 @@ def maybe_init_wandb(
     if mode is None:
         mode = "online" if os.environ.get("WANDB_API_KEY") else "offline"
 
-    logged = {
-        k: v
-        for k, v in cfg.items()
-        if k not in ("wandb", "wandb_project", "wandb_entity", "out")
-    }
+    activation = mlp_activation(cfg, model_name)
+
+    logged = {k: v for k, v in cfg.items() if k not in ("wandb", "wandb_project", "wandb_entity", "out")}
     # Keep nested model knobs; add flat scalars for Config / filters (not metrics).
     model_cfg = logged.get("model")
     if isinstance(model_cfg, dict):
         logged["model"] = {**model_cfg, "name": model_name}
+        if activation is not None:
+            logged["model"]["activation"] = activation
     else:
         logged["model"] = {"name": model_name}
+        if activation is not None:
+            logged["model"]["activation"] = activation
     logged.update(
         {
             "dataset": dataset,
@@ -100,14 +125,22 @@ def maybe_init_wandb(
             "num_params": n_params,
         }
     )
+    if activation is not None:
+        logged["activation"] = activation
 
     wandb.init(
         project=proj,
         entity=ent,
-        name=run_name(dataset, model_name),
+        name=run_name(dataset, model_name, activation),
         group=dataset,
         job_type=model_name,
-        tags=run_tags(dataset=dataset, model=model_name, task=task, seed=seed),
+        tags=run_tags(
+            dataset=dataset,
+            model=model_name,
+            task=task,
+            seed=seed,
+            activation=activation,
+        ),
         mode=mode,
         config=logged,
     )

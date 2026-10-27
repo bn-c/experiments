@@ -1,0 +1,26 @@
+# linear_bench MLP activation grid: every domain × {relu, gelu, tanh, silu}
+# Desk runner: one path per line (skip blank / # comments).
+linear_bench/configs/mnist1d_mlp.json
+linear_bench/configs/mnist1d_mlp_gelu.json
+linear_bench/configs/mnist1d_mlp_tanh.json
+linear_bench/configs/mnist1d_mlp_silu.json
+linear_bench/configs/mnist_mlp.json
+linear_bench/configs/mnist_mlp_gelu.json
+linear_bench/configs/mnist_mlp_tanh.json
+linear_bench/configs/mnist_mlp_silu.json
+linear_bench/configs/fashion_mnist_mlp.json
+linear_bench/configs/fashion_mnist_mlp_gelu.json
+linear_bench/configs/fashion_mnist_mlp_tanh.json
+linear_bench/configs/fashion_mnist_mlp_silu.json
+linear_bench/configs/cifar10_mlp.json
+linear_bench/configs/cifar10_mlp_gelu.json
+linear_bench/configs/cifar10_mlp_tanh.json
+linear_bench/configs/cifar10_mlp_silu.json
+linear_bench/configs/svhn_mlp.json
+linear_bench/configs/svhn_mlp_gelu.json
+linear_bench/configs/svhn_mlp_tanh.json
+linear_bench/configs/svhn_mlp_silu.json
+linear_bench/configs/synthetic_lrb_mlp.json
+linear_bench/configs/synthetic_lrb_mlp_gelu.json
+linear_bench/configs/synthetic_lrb_mlp_tanh.json
+linear_bench/configs/synthetic_lrb_mlp_silu.json
