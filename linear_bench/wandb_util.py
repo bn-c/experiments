@@ -11,6 +11,7 @@ Dashboard UX (one project ``linear-bench``):
 - **job_type** = model (filter linear vs mlp)
 - **tags** = dataset, model, task, ``seed-{n}``
 - **config** holds dataset / model / seed / task / hyperparams
+  (incl. ``optimizer``, ``weight_decay``)
 - **metrics** stay schema-only: ``train/loss``, ``val/loss``, ``val/acc`` or
   ``val/mse`` — no domain/model keys in the chart series
 """

@@ -4,6 +4,9 @@ Cheap harness for swapping **linear** vs **MLP** formulations and running short
 train/eval loops on CPU (seconds–minutes). Not a research-paper clone of every
 benchmark — just enough to iterate across formulations and domains.
 
+**Optimizer:** AdamW (`lr` + optional `weight_decay`, default `0.01`). Both land in
+W&B config as `optimizer` / `weight_decay` when logging is on.
+
 **Policy:** prefer HuggingFace Hub for every corpus that has a real Hub source.
 Only `synthetic_lrb` stays in-repo (controlled ground truth; no Hub dataset).
 
