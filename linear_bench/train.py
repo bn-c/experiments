@@ -122,7 +122,6 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
     t0 = time.perf_counter()
     try:
         for epoch in range(1, epochs + 1):
-            t_ep = time.perf_counter()
             model.train()
             running = 0.0
             n_ex = 0
@@ -148,7 +147,8 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
                     meta=meta,
                 )
                 last_repr = repr_m
-            epoch_sec = time.perf_counter() - t_ep
+            # Cumulative wall from train start (W&B ``time/epoch_sec`` / JSON ``epoch_sec``).
+            epoch_sec = time.perf_counter() - t0
             row: dict[str, float] = {
                 "epoch": float(epoch),
                 "train_loss": train_loss,

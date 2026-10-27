@@ -48,6 +48,8 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert "train_mse" in metrics["final"]
     assert "epoch_sec" in metrics["final"]
     assert metrics["final"]["epoch_sec"] > 0
+    # epoch_sec is cumulative; final ≈ full wall (same clock).
+    assert abs(metrics["final"]["epoch_sec"] - metrics["elapsed_sec"]) < 0.5
     # synthetic_lrb is intentionally local (no Hub corpus)
     assert "huggingface" not in str(metrics["meta"].get("source", ""))
     # Per-epoch repr probes (default on); LRB also emits feature_align.
@@ -74,6 +76,36 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert "epoch_sec" in loaded["history"][0]
     assert "repr/weight_eff_rank" in loaded["history"][0]
     assert "repr/feature_align" in loaded["final"]
+
+
+def test_epoch_sec_is_cumulative():
+    """``epoch_sec`` / W&B ``time/epoch_sec`` is wall from train start, not per-epoch Δ."""
+    cfg = {
+        "dataset": "synthetic_lrb",
+        "data": {
+            "n": 16,
+            "n_p": 24,
+            "sparsity": 0.2,
+            "noise": 0.01,
+            "n_train": 64,
+            "n_test": 32,
+            "seed": 0,
+        },
+        "model": {"name": "linear"},
+        "epochs": 3,
+        "batch_size": 16,
+        "lr": 0.05,
+        "seed": 0,
+        "device": "cpu",
+        "repr_analysis": False,
+    }
+    metrics = train_one(cfg)
+    secs = [row["epoch_sec"] for row in metrics["history"]]
+    assert len(secs) == 3
+    assert secs[0] > 0
+    assert secs[1] >= secs[0]
+    assert secs[2] >= secs[1]
+    assert abs(secs[-1] - metrics["elapsed_sec"]) < 0.5
 
 
 def test_wandb_resolve_default_off_and_cli_overrides():
