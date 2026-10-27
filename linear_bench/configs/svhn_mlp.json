@@ -15,5 +15,6 @@
   "lr": 0.001,
   "seed": 0,
   "device": "cpu",
+  "wandb": true,
   "out": "outputs/linear_bench/svhn_mlp.json"
 }

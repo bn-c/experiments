@@ -1,0 +1,20 @@
+{
+  "dataset": "mnist1d",
+  "data": {
+    "source": "hf",
+    "hf_path": "christopher/mnist1d"
+  },
+  "model": {
+    "name": "mlp",
+    "width": 256,
+    "depth": 2,
+    "activation": "relu"
+  },
+  "epochs": 40,
+  "batch_size": 128,
+  "lr": 0.001,
+  "seed": 0,
+  "device": "cpu",
+  "wandb": true,
+  "out": "outputs/linear_bench/mnist1d_mlp.json"
+}
