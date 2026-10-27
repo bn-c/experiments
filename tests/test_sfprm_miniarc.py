@@ -280,3 +280,12 @@ def test_token_pad_mask_and_residual():
     z2[:, -1] = project_to_sphere(torch.randn_like(z2[:, -1]))
     r = chordal_residual(z, z2, token_mask=pad)
     assert torch.allclose(r, torch.zeros_like(r), atol=1e-5)
+
+
+def test_want_console_progress_respects_wandb_and_force():
+    from eval_vote_augs import want_console_progress
+
+    assert want_console_progress(force=True) is True
+    assert want_console_progress(force=False) is False
+    assert want_console_progress(force=True, wandb_on=True) is True  # force wins
+    assert want_console_progress(wandb_on=True) is False

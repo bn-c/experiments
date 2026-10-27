@@ -30,7 +30,7 @@ from data.dataset import (  # noqa: E402
     build_cache,
     make_train_indices,
 )
-from eval_vote_augs import eval_vote_augs  # noqa: E402
+from eval_vote_augs import eval_vote_augs, want_console_progress  # noqa: E402
 from models.ema import EMAModel  # noqa: E402
 from models.sfprm_core import (  # noqa: E402
     DEFAULT_D_FF,
@@ -318,7 +318,15 @@ def train(args: argparse.Namespace) -> None:
     last_path = out_dir / "model_last.pt"
 
     model.train()
-    pbar = tqdm(range(1, args.steps + 1), desc="train", dynamic_ncols=True)
+    # Bars + CR postfix pollute W&B Logs; use plain lines when non-TTY or wandb-on.
+    use_bar = want_console_progress(wandb_on=wandb_on)
+    pbar = tqdm(
+        range(1, args.steps + 1),
+        desc="train",
+        dynamic_ncols=True,
+        file=sys.stderr,
+        disable=not use_bar,
+    )
     running = 0.0
     for step in pbar:
         idx = make_train_indices(len(train_cache), args.batch_size, step, gen).to(device)
@@ -381,27 +389,38 @@ def train(args: argparse.Namespace) -> None:
         if not math.isfinite(loss_v):
             raise RuntimeError(f"non-finite loss at step {step}")
         running = 0.9 * running + 0.1 * loss_v if step > 1 else loss_v
-        pbar.set_postfix(loss=f"{running:.4f}", lam=f"{float(model.lambda_param.item()):.3f}")
+        lam_v = float(model.lambda_param.item())
+        if use_bar:
+            pbar.set_postfix(loss=f"{running:.4f}", lam=f"{lam_v:.3f}")
 
-        if wandb_on and step % args.log_every == 0:
-            wandb.log(
-                {
-                    "train/loss": loss_v,
-                    "train/ce": float(ce.item()),
-                    "train/q_loss": float(q_loss.item()),
-                    "train/lr_muon": args.lr_muon,
-                    "train/lr_adam": args.lr_adam,
-                    "train/lambda": float(model.lambda_param.item()),
-                    "train/mean_eta": float(state.eta.mean().item()),
-                    "train/halt_frac": float(state.halted.float().mean().item()),
-                },
-                step=step,
-            )
+        if step % args.log_every == 0 or step == args.steps:
+            if not use_bar:
+                print(
+                    f"[step {step}] train loss={loss_v:.4f} "
+                    f"ce={float(ce.item()):.4f} q={float(q_loss.item()):.4f} "
+                    f"lam={lam_v:.3f}",
+                    flush=True,
+                )
+            if wandb_on:
+                wandb.log(
+                    {
+                        "train/loss": loss_v,
+                        "train/ce": float(ce.item()),
+                        "train/q_loss": float(q_loss.item()),
+                        "train/lr_muon": args.lr_muon,
+                        "train/lr_adam": args.lr_adam,
+                        "train/lambda": lam_v,
+                        "train/mean_eta": float(state.eta.mean().item()),
+                        "train/halt_frac": float(state.halted.float().mean().item()),
+                    },
+                    step=step,
+                )
 
         do_eval = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.steps)
         if do_eval:
             eval_model = ema.shadow if ema is not None else model
-            # One pass: 1-shot (unaug) + D₄×color vote (paper B.1)
+            # One pass: 1-shot (unaug) + D₄×color vote (paper B.1).
+            # Silence mid-eval bars/milestones — only the summary line below for W&B Logs.
             vote = eval_vote_augs(
                 eval_model,
                 data_dir,
@@ -414,15 +433,17 @@ def train(args: argparse.Namespace) -> None:
                 max_loops=args.max_loops,
                 gamma=args.gamma_eval,
                 max_tasks=args.max_tasks,
-                show_progress=True,
+                show_progress=False,
+                log_every=0,
             )
             pas = vote.unaug_pass_at_1
             mean_halt = vote.unaug_mean_halt
             print(
-                f"\n[step {step}] eval 1-shot Pass@1={pas:.4f} mean_halt={mean_halt:.1f} | "
+                f"[step {step}] eval 1-shot Pass@1={pas:.4f} mean_halt={mean_halt:.1f} | "
                 f"vote Pass@1={vote.vote_pass_at_1:.4f} "
                 f"mean_halt/aug={vote.vote_mean_halt_per_aug:.1f} "
-                f"(wall {vote.wall_s:.0f}s)"
+                f"(wall {vote.wall_s:.0f}s)",
+                flush=True,
             )
             if wandb_on:
                 wandb.log(

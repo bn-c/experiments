@@ -200,9 +200,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     wandb_on = maybe_init_wandb(args)
+    from eval_vote_augs import eval_vote_augs, want_console_progress  # local import keeps CLI light
+
+    use_bar = want_console_progress(wandb_on=wandb_on)
     hits = 0
     halt_sum = 0
-    for i in tqdm(range(len(cache)), desc="eval", dynamic_ncols=True):
+    for i in tqdm(
+        range(len(cache)),
+        desc="eval",
+        dynamic_ncols=True,
+        file=sys.stderr,
+        disable=not use_bar,
+    ):
         exact, used = evaluate_task(
             model,
             cache.tokens[i : i + 1],
@@ -224,8 +233,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Mean halt steps: {mean_halt:.2f}")
 
     # Paper vote-over-augs on the same checkpoint (also yields unaug as a check).
-    from eval_vote_augs import eval_vote_augs  # local import keeps CLI light
-
     vote = eval_vote_augs(
         model,
         args.data_dir,
@@ -238,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         max_loops=args.max_loops,
         gamma=args.gamma,
         max_tasks=args.max_tasks,
+        show_progress=False,
+        log_every=0,
     )
     print(
         f"vote Pass@1: {vote.vote_pass_at_1:.4f}  "
