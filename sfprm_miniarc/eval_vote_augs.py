@@ -42,6 +42,15 @@ from evaluate import _build_model_from_ckpt, resolve_device  # noqa: E402
 from models.solver import SolverConfig, SolverState, solver_step  # noqa: E402
 
 
+def want_console_progress(*, force: bool | None = None, wandb_on: bool = False) -> bool:
+    """Whether CR/tqdm bars are safe (interactive TTY, not W&B-synced junk)."""
+    if force is not None:
+        return force
+    if wandb_on:
+        return False
+    return sys.stderr.isatty()
+
+
 def inv_dihedral(grid: np.ndarray, k: int) -> np.ndarray:
     """Inverse of ``dihedral`` (rot90 then optional fliplr)."""
     g = np.asarray(grid, dtype=np.int64)
@@ -176,12 +185,16 @@ def eval_vote_augs(
     max_loops: int = 200,
     gamma: float = 0.9,
     max_tasks: int | None = None,
-    log_every: int = 10,
-    show_progress: bool = True,
+    log_every: int = 0,
+    show_progress: bool | None = None,
 ) -> VoteEvalResult:
     """Run unaugmented + D₄×color vote Pass@1 (paper B.1).
 
     Index 0 of each task's aug batch is always (d4=0, identity) → 1-shot.
+
+    Progress: tqdm bars only when ``show_progress`` is true (default: stderr is a
+    TTY). Mid-eval lines only when ``log_every > 0`` (default off — callers that
+    print a final summary should leave this at 0 so W&B Logs stay readable).
     """
     model.eval()
     use_amp = device.type == "cuda"
@@ -200,9 +213,13 @@ def eval_vote_augs(
     halt_reasons: Counter = Counter()
 
     t0 = time.perf_counter()
-    iterator = enumerate(files)
-    if show_progress:
-        iterator = enumerate(tqdm(files, desc="vote-eval", dynamic_ncols=True))
+    use_bar = want_console_progress(force=show_progress)
+    bar = (
+        tqdm(files, desc="vote-eval", dynamic_ncols=True, file=sys.stderr)
+        if use_bar
+        else None
+    )
+    iterator = enumerate(bar if bar is not None else files)
 
     for puzzle_id, path in iterator:
         task = load_task_json(path)
@@ -265,15 +282,18 @@ def eval_vote_augs(
         vote_hits += int(np.array_equal(voted, canon_gt))
 
         done = puzzle_id + 1
-        if show_progress and (done % log_every == 0 or done == len(files)):
-            print(
-                f"\n[{done}/{len(files)}] "
+        if log_every > 0 and (done % log_every == 0 or done == len(files)):
+            line = (
+                f"[{done}/{len(files)}] "
                 f"unaug={unaug_hits / done:.4f} vote={vote_hits / done:.4f} "
                 f"mean_halt_unaug={unaug_halt / done:.1f} "
                 f"mean_halt_per_aug={vote_halt_sum / max(vote_halt_n, 1):.1f} "
-                f"halt_reasons={dict(halt_reasons)}",
-                flush=True,
+                f"halt_reasons={dict(halt_reasons)}"
             )
+            if bar is not None:
+                bar.write(line)
+            else:
+                print(line, flush=True)
 
     n = len(files)
     return VoteEvalResult(
@@ -311,7 +331,12 @@ def main() -> int:
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--max_tasks", type=int, default=None)
     p.add_argument("--no_ema", action="store_true")
-    p.add_argument("--log_every", type=int, default=10)
+    p.add_argument(
+        "--log_every",
+        type=int,
+        default=0,
+        help="Print mid-eval milestones every N tasks (0=silent; final summary always prints)",
+    )
     p.add_argument("--wandb-project", type=str, default="sfprm-miniarc")
     p.add_argument("--wandb-entity", type=str, default=None)
     p.add_argument("--wandb", action="store_true", default=None)
@@ -345,6 +370,7 @@ def main() -> int:
         gamma=args.gamma,
         max_tasks=args.max_tasks,
         log_every=args.log_every,
+        show_progress=want_console_progress(),
     )
 
     n_augs = 8 * args.n_color_perms
