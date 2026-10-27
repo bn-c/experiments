@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from torch.utils.data import Dataset
 
 from .hf_vision import (
     PRESETS as HF_PRESETS,
+)
+from .hf_vision import (
     load_cifar10,
     load_cifar100,
     load_fashion_mnist,
