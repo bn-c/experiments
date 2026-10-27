@@ -9,6 +9,7 @@ import pytest
 
 from linear_bench.data import HF_PRESETS, REGISTRY
 from linear_bench.train import train_one, write_metrics
+from linear_bench.wandb_util import resolve_wandb_enabled
 
 
 def test_smoke_train_writes_metric(tmp_path: Path):
@@ -35,6 +36,7 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert isinstance(metrics["primary_value"], float)
     assert metrics["epochs"] == 1
     assert metrics["n_params"] > 0
+    assert metrics["wandb"] is False  # smoke stays offline / no W&B
     # synthetic_lrb is intentionally local (no Hub corpus)
     assert "huggingface" not in str(metrics["meta"].get("source", ""))
 
@@ -43,6 +45,14 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     loaded = json.loads(out.read_text())
     assert "primary_value" in loaded
     assert loaded["final"]["mse"] == loaded["primary_value"]
+
+
+def test_wandb_resolve_default_off_and_cli_overrides():
+    assert resolve_wandb_enabled({}, None, False) is False
+    assert resolve_wandb_enabled({"wandb": True}, None, False) is True
+    assert resolve_wandb_enabled({"wandb": True}, None, True) is False
+    assert resolve_wandb_enabled({}, True, False) is True
+    assert resolve_wandb_enabled({"wandb": False}, True, False) is True
 
 
 def test_mnist1d_synthetic_offline_smoke():

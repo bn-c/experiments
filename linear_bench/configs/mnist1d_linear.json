@@ -7,7 +7,7 @@
   "model": {
     "name": "linear"
   },
-  "epochs": 10,
+  "epochs": 40,
   "batch_size": 128,
   "lr": 0.01,
   "seed": 0,

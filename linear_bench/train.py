@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from .data import load_dataset
 from .models import build_model
+from .wandb_util import finish_wandb, log_epoch, maybe_init_wandb
 
 
 def set_seed(seed: int) -> None:
@@ -71,7 +72,8 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
 
     data_cfg = dict(cfg.get("data", {}))
     data_cfg.setdefault("seed", seed)
-    train_ds, test_ds, meta = load_dataset(str(cfg["dataset"]), data_cfg)
+    dataset_name = str(cfg["dataset"])
+    train_ds, test_ds, meta = load_dataset(dataset_name, data_cfg)
     task = str(meta["task"])
 
     batch_size = int(cfg.get("batch_size", 64))
@@ -87,31 +89,53 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
 
     criterion, primary = _loss_and_metric(task)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
+    n_params = sum(p.numel() for p in model.parameters())
+
+    wandb_on = maybe_init_wandb(
+        cfg,
+        dataset=dataset_name,
+        model_name=model_name,
+        task=task,
+        n_params=n_params,
+    )
 
     history: list[dict[str, float]] = []
     t0 = time.perf_counter()
-    for epoch in range(1, epochs + 1):
-        model.train()
-        running = 0.0
-        n_ex = 0
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-            opt.zero_grad(set_to_none=True)
-            out = model(x)
-            loss = criterion(out, y)
-            loss.backward()
-            opt.step()
-            running += float(loss.item()) * int(x.shape[0])
-            n_ex += int(x.shape[0])
-        train_loss = running / max(n_ex, 1)
-        ev = evaluate(model, test_loader, task, device)
-        row = {"epoch": float(epoch), "train_loss": train_loss, **ev}
-        history.append(row)
+    try:
+        for epoch in range(1, epochs + 1):
+            model.train()
+            running = 0.0
+            n_ex = 0
+            for x, y in train_loader:
+                x, y = x.to(device), y.to(device)
+                opt.zero_grad(set_to_none=True)
+                out = model(x)
+                loss = criterion(out, y)
+                loss.backward()
+                opt.step()
+                running += float(loss.item()) * int(x.shape[0])
+                n_ex += int(x.shape[0])
+            train_loss = running / max(n_ex, 1)
+            ev = evaluate(model, test_loader, task, device)
+            row = {"epoch": float(epoch), "train_loss": train_loss, **ev}
+            history.append(row)
+            if wandb_on:
+                log_epoch(
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    val_metrics=ev,
+                    dataset=dataset_name,
+                    model_type=model_name,
+                    primary=primary,
+                )
+    finally:
+        if wandb_on:
+            finish_wandb()
 
     elapsed = time.perf_counter() - t0
     final = history[-1] if history else {}
     metrics: dict[str, Any] = {
-        "dataset": cfg["dataset"],
+        "dataset": dataset_name,
         "model": model_name,
         "task": task,
         "seed": seed,
@@ -119,12 +143,13 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
         "batch_size": batch_size,
         "device": str(device),
         "elapsed_sec": round(elapsed, 4),
-        "n_params": sum(p.numel() for p in model.parameters()),
+        "n_params": n_params,
         "meta": meta,
         "final": {k: v for k, v in final.items() if k != "epoch"},
         "primary_metric": primary,
         "primary_value": final.get(primary),
         "history": history,
+        "wandb": bool(wandb_on),
     }
     return metrics
 
