@@ -37,6 +37,8 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert metrics["epochs"] == 1
     assert metrics["n_params"] > 0
     assert metrics["wandb"] is False  # smoke stays offline / no W&B
+    assert cfg["optimizer"] == "AdamW"
+    assert cfg["weight_decay"] == 0.01  # default when omitted
     # synthetic_lrb is intentionally local (no Hub corpus)
     assert "huggingface" not in str(metrics["meta"].get("source", ""))
 

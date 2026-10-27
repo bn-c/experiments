@@ -79,6 +79,10 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
     batch_size = int(cfg.get("batch_size", 64))
     epochs = int(cfg.get("epochs", 2))
     lr = float(cfg.get("lr", 1e-2))
+    weight_decay = float(cfg.get("weight_decay", 0.01))
+    # Surface optimizer knobs in cfg so W&B config (and metrics consumers) see them.
+    cfg["optimizer"] = "AdamW"
+    cfg["weight_decay"] = weight_decay
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
@@ -88,7 +92,7 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
     model = build_model(model_name, int(meta["in_dim"]), int(meta["out_dim"]), model_cfg).to(device)
 
     criterion, primary = _loss_and_metric(task)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     n_params = sum(p.numel() for p in model.parameters())
 
     wandb_on = maybe_init_wandb(
