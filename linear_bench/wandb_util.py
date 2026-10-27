@@ -12,8 +12,11 @@ Dashboard UX (one project ``linear-bench``):
 - **tags** = dataset, model, task, ``seed-{n}``
 - **config** holds dataset / model / seed / task / hyperparams
   (incl. ``optimizer``, ``weight_decay``)
-- **metrics** stay schema-only: ``train/loss``, ``val/loss``, ``val/acc`` or
-  ``val/mse`` — no domain/model keys in the chart series
+- **metrics** stay schema-only: ``train/loss``, ``train/acc``|``train/mse``,
+  ``val/loss``, ``val/acc``|``val/mse``, ``time/epoch_sec`` — no domain/model
+  keys in the chart series
+- **summary** once at end: ``summary/train_acc``|``summary/train_mse``,
+  matching ``summary/val_*``, plus ``summary/wall_sec`` for table compare
 """
 
 from __future__ import annotations
@@ -110,25 +113,80 @@ def maybe_init_wandb(
     return True
 
 
+def epoch_metric_payload(
+    *,
+    train_loss: float,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    primary: str,
+    epoch_sec: float | None = None,
+) -> dict[str, float]:
+    """Flat ``train/*`` / ``val/*`` / ``time/*`` keys for one epoch (no domain/model in names)."""
+    payload: dict[str, float] = {
+        "train/loss": float(train_loss),
+        "val/loss": float(val_metrics["loss"]),
+    }
+    if primary == "acc":
+        if "acc" in train_metrics:
+            payload["train/acc"] = float(train_metrics["acc"])
+        if "acc" in val_metrics:
+            payload["val/acc"] = float(val_metrics["acc"])
+    if primary == "mse":
+        # train/mse from eval pass (exact SSE/n); may differ slightly from train/loss
+        if "mse" in train_metrics:
+            payload["train/mse"] = float(train_metrics["mse"])
+        if "mse" in val_metrics:
+            payload["val/mse"] = float(val_metrics["mse"])
+    if epoch_sec is not None:
+        payload["time/epoch_sec"] = float(epoch_sec)
+    return payload
+
+
 def log_epoch(
     *,
     epoch: int,
     train_loss: float,
+    train_metrics: dict[str, float],
     val_metrics: dict[str, float],
     primary: str,
+    epoch_sec: float | None = None,
 ) -> None:
-    """Log one epoch: ``train/loss``, ``val/loss``, plus ``val/acc`` or ``val/mse``."""
+    """Log one epoch: train/val loss + acc|mse, optional ``time/epoch_sec``."""
     if not _WANDB or wandb.run is None:
         return
-    payload: dict[str, Any] = {
-        "train/loss": train_loss,
-        "val/loss": float(val_metrics["loss"]),
-    }
-    if primary == "acc" and "acc" in val_metrics:
-        payload["val/acc"] = float(val_metrics["acc"])
-    if primary == "mse" and "mse" in val_metrics:
-        payload["val/mse"] = float(val_metrics["mse"])
-    wandb.log(payload, step=epoch)
+    wandb.log(
+        epoch_metric_payload(
+            train_loss=train_loss,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            primary=primary,
+            epoch_sec=epoch_sec,
+        ),
+        step=epoch,
+    )
+
+
+def set_run_summary(
+    *,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    primary: str,
+    wall_sec: float,
+) -> None:
+    """Final summary scalars once for W&B table compare (metrics + ``summary/wall_sec``)."""
+    if not _WANDB or wandb.run is None:
+        return
+    if primary == "acc":
+        if "acc" in train_metrics:
+            wandb.run.summary["summary/train_acc"] = float(train_metrics["acc"])
+        if "acc" in val_metrics:
+            wandb.run.summary["summary/val_acc"] = float(val_metrics["acc"])
+    elif primary == "mse":
+        if "mse" in train_metrics:
+            wandb.run.summary["summary/train_mse"] = float(train_metrics["mse"])
+        if "mse" in val_metrics:
+            wandb.run.summary["summary/val_mse"] = float(val_metrics["mse"])
+    wandb.run.summary["summary/wall_sec"] = float(wall_sec)
 
 
 def finish_wandb() -> None:

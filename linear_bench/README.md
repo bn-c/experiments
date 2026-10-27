@@ -60,7 +60,7 @@ WANDB_MODE=offline python -m linear_bench --config … --wandb
 | **job_type** | model (`linear`, `mlp`) | Filter formulation |
 | **tags** | dataset, model, task, `seed-N` | Sidebar filters |
 | **config** | dataset, model, seed, task, hyperparams | Run detail / parallel coords |
-| **metrics** | `train/loss`, `val/loss`, `val/acc` or `val/mse` | Shared chart keys across runs |
+| **metrics** | `train/loss`, `train/acc`\|`train/mse`, `val/loss`, `val/acc`\|`val/mse`, `time/epoch_sec`; summary: `summary/train_*`, `summary/val_*`, `summary/wall_sec` | Shared chart keys across runs |
 
 Domain and model live in name/tags/group/config — **not** as metric keys — so
 charts do not mix unrelated series. Default project: `linear-bench`.
