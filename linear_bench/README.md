@@ -4,15 +4,17 @@ Cheap harness for swapping **linear** vs **MLP** formulations and running short
 train/eval loops on CPU (seconds–minutes). Not a research-paper clone of every
 benchmark — just enough to iterate across formulations and domains.
 
+**Policy:** prefer HuggingFace Hub for every corpus that has a real Hub source.
+Only `synthetic_lrb` stays in-repo (controlled ground truth; no Hub dataset).
+
 ## Quick smoke
 
 From repo root (needs `torch`, `numpy`, `datasets`, `pillow` — already in the
 root env):
 
 ```bash
-python -m linear_bench --config linear_bench/configs/smoke_mnist1d.json
-python -m linear_bench --config linear_bench/configs/smoke_synthetic.json
-# HuggingFace multi-domain (downloads+caches on first run)
+python -m linear_bench --config linear_bench/configs/smoke_mnist1d.json   # HF christopher/mnist1d
+python -m linear_bench --config linear_bench/configs/smoke_synthetic.json # in-repo generator
 python -m linear_bench --config linear_bench/configs/smoke_hf_mnist.json
 python -m linear_bench --config linear_bench/configs/smoke_hf_cifar10.json
 ```
@@ -52,25 +54,32 @@ REGISTRY["my_thing"] = build_my_thing
 { "model": { "name": "my_thing", "...": "knobs" } }
 ```
 
-## Datasets
+## Datasets: HF vs local
 
-| name | task | source / knobs |
+| name | default source | Hub id / notes |
 | --- | --- | --- |
-| `mnist1d` | classification (10-way, length-40) | `source` (`official`\|`synthetic`), `max_train`, `max_test`, `cache` |
-| `synthetic_lrb` | regression: recover sparse `z` from `x = A z + ε` | `n`, `n_p`, `sparsity`, `noise`, `n_train`, `n_test` |
-| `cifar10` / `cifar100` / `mnist` / `svhn` / `stl10` / `fashion_mnist` | HF vision classification (flattened) | `max_train`, `max_test`, `resize`, … |
-| `hf` | same, arbitrary Hub dataset | `hf_path`, optional `hf_name`, `image_key`, `label_key`, `n_classes`, … |
+| `mnist1d` | **HF** | [`christopher/mnist1d`](https://huggingface.co/datasets/christopher/mnist1d) (Greydanus mirror). Fallbacks: `pickle` (GitHub pkl), `synthetic` (offline stand-in). |
+| `mnist` | **HF** | `ylecun/mnist` |
+| `cifar10` / `cifar100` | **HF** | `uoft-cs/cifar10`, `uoft-cs/cifar100` |
+| `svhn` | **HF** | `ufldl-stanford/svhn` (`cropped_digits`) |
+| `stl10` | **HF** | `tanganke/stl10` (ImageNette-scale stand-in; classic ImageNette scripts broken on current `datasets`) |
+| `fashion_mnist` | **HF** | `zalando-datasets/fashion_mnist` |
+| `hf` | **HF** | arbitrary `namespace/name` via `hf_path` |
+| `synthetic_lrb` | **local only** | In-repo Bernoulli-Gaussian → `x = A z + ε`. No Hub dataset — knobs define ground truth. |
 
-`synthetic_lrb` is LRB-inspired (controllable ambient dim, feature count,
-sparsity, superposition when `n_p > n`). It is **not** a reimplementation of
-the full Linear Representation Benchmark.
+### MNIST-1D sources
 
-`stl10` stands in for ImageNette-scale RGB (96→32 by default) — classic
-ImageNette Hub scripts are no longer loadable via current `datasets`.
+```json
+{ "dataset": "mnist1d", "data": { "source": "hf", "max_train": 256, "max_test": 64 } }
+{ "dataset": "mnist1d", "data": { "source": "pickle" } }      // Greydanus GitHub pkl
+{ "dataset": "mnist1d", "data": { "source": "synthetic", "n_train": 256, "n_test": 64 } }
+```
+
+Default is `hf`. If Hub load fails, the loader demotes to pickle, then synthetic.
 
 ### Pointing at HuggingFace datasets
 
-**Preset** (Hub id resolved for you):
+**Preset:**
 
 ```json
 {
@@ -79,8 +88,8 @@ ImageNette Hub scripts are no longer loadable via current `datasets`.
 }
 ```
 
-**Arbitrary Hub dataset** via the generic `hf` entry — use `namespace/name`
-ids (current `datasets` rejects bare names like `cifar10`):
+**Arbitrary Hub dataset** via `hf` — use `namespace/name` ids (current
+`datasets` rejects bare names like `cifar10`):
 
 ```json
 {
@@ -96,37 +105,20 @@ ids (current `datasets` rejects bare names like `cifar10`):
 }
 ```
 
-Or override a preset’s path:
+Vision presets flatten images for linear/MLP (optional `resize`, train-normalize).
+First run caches under the HuggingFace hub cache.
 
-```json
-{
-  "dataset": "mnist",
-  "data": { "hf_path": "ylecun/mnist", "max_train": 128, "max_test": 64 }
-}
-```
+### Synthetic LRB (local)
 
-Images are resized (optional), cast to float `[0,1]`, flattened for linear/MLP,
-and train-normalized. First run caches under the HuggingFace hub cache.
-
-Preset Hub ids:
-
-| preset | `hf_path` | notes |
-| --- | --- | --- |
-| `cifar10` | `uoft-cs/cifar10` | `img` / `label` |
-| `cifar100` | `uoft-cs/cifar100` | `fine_label` |
-| `mnist` | `ylecun/mnist` | grayscale kept as L |
-| `svhn` | `ufldl-stanford/svhn` | config `cropped_digits` |
-| `stl10` | `tanganke/stl10` | default `resize: 32` |
-| `fashion_mnist` | `zalando-datasets/fashion_mnist` | grayscale |
+Kept in-repo because the experiment *is* the controllable generator
+(`n`, `n_p`, `sparsity`, `noise`, `seed`). There is no meaningful Hub “dataset”
+for that ground-truth matrix. Prefer HF for every real corpus above.
 
 ## Optional later: NAS-Bench-201 / LEMUR 2
 
-- **NAS-Bench-201**: zero-GPU table lookup for cell architectures. Skip as a
-  hard dep here. To plug later, wrap the official API (or a cached accuracy
-  table) behind a tiny `score_arch(config) -> metrics` helper — no training
-  loop needed.
-- **LEMUR 2**: out of scope for this harness; revisit if a tiny offline slice
-  appears.
+- **NAS-Bench-201**: zero-GPU table lookup — skip as a hard dep; plug later via
+  a tiny `score_arch(config) -> metrics` helper.
+- **LEMUR 2**: out of scope; revisit if a tiny offline slice appears.
 
 ## Test
 

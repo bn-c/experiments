@@ -35,6 +35,8 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert isinstance(metrics["primary_value"], float)
     assert metrics["epochs"] == 1
     assert metrics["n_params"] > 0
+    # synthetic_lrb is intentionally local (no Hub corpus)
+    assert "huggingface" not in str(metrics["meta"].get("source", ""))
 
     out = tmp_path / "metrics.json"
     write_metrics(metrics, out)
@@ -43,7 +45,7 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert loaded["final"]["mse"] == loaded["primary_value"]
 
 
-def test_mnist1d_synthetic_smoke():
+def test_mnist1d_synthetic_offline_smoke():
     cfg = {
         "dataset": "mnist1d",
         "data": {"source": "synthetic", "n_train": 64, "n_test": 32, "seed": 1},
@@ -55,19 +57,41 @@ def test_mnist1d_synthetic_smoke():
         "device": "cpu",
     }
     metrics = train_one(cfg)
+    assert metrics["meta"]["source"] == "synthetic"
+    assert metrics["primary_metric"] == "acc"
+    assert 0.0 <= float(metrics["primary_value"]) <= 1.0
+
+
+def test_mnist1d_hf_default_smoke():
+    """Default mnist1d source is Hub christopher/mnist1d."""
+    cfg = {
+        "dataset": "mnist1d",
+        "data": {"max_train": 64, "max_test": 32},  # source defaults to hf
+        "model": {"name": "linear"},
+        "epochs": 1,
+        "batch_size": 32,
+        "lr": 0.05,
+        "seed": 0,
+        "device": "cpu",
+    }
+    metrics = train_one(cfg)
+    assert metrics["meta"]["source"] == "huggingface"
+    assert metrics["meta"]["hf_path"] == "christopher/mnist1d"
+    assert metrics["meta"]["n_train"] == 64
+    assert metrics["meta"]["in_dim"] == 40
     assert metrics["primary_metric"] == "acc"
     assert 0.0 <= float(metrics["primary_value"]) <= 1.0
 
 
 def test_hf_presets_registered():
-    for name in ("cifar10", "cifar100", "mnist", "svhn", "stl10", "fashion_mnist", "hf"):
+    for name in ("cifar10", "cifar100", "mnist", "svhn", "stl10", "fashion_mnist", "hf", "mnist1d"):
         assert name in REGISTRY
     assert set(HF_PRESETS) >= {"cifar10", "cifar100", "mnist", "svhn", "stl10"}
 
 
 @pytest.mark.parametrize("dataset", ["mnist", "cifar10"])
 def test_hf_domain_smoke(dataset: str):
-    """Real HF download+train on ≥2 domains; tiny subsets keep it CPU-fast."""
+    """Real HF download+train on ≥2 vision domains; tiny subsets keep it CPU-fast."""
     cfg = {
         "dataset": dataset,
         "data": {"max_train": 64, "max_test": 32},

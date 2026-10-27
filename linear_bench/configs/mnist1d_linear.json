@@ -1,7 +1,8 @@
 {
   "dataset": "mnist1d",
   "data": {
-    "source": "official"
+    "source": "hf",
+    "hf_path": "christopher/mnist1d"
   },
   "model": {
     "name": "linear"

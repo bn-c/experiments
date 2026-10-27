@@ -1,5 +1,10 @@
 """Synthetic linear-representation generator (LRB-inspired, not a paper clone).
 
+**Stays in-repo on purpose.** There is no HuggingFace Hub dataset for this
+controlled generator: knobs (``n``, ``n_p``, sparsity, noise, seed) define
+the ground-truth ``A`` and sparse codes. Prefer HF for every *real* corpus;
+keep this local for recoverable synthetic ground truth.
+
 Observation model
 -----------------
 Latents ``z ∈ R^{n_p}`` are sparse (Bernoulli-Gaussian). Observations are

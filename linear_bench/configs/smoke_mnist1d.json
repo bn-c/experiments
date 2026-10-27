@@ -1,10 +1,10 @@
 {
   "dataset": "mnist1d",
   "data": {
-    "source": "synthetic",
-    "n_train": 256,
-    "n_test": 64,
-    "seed": 0
+    "source": "hf",
+    "hf_path": "christopher/mnist1d",
+    "max_train": 256,
+    "max_test": 64
   },
   "model": {
     "name": "mlp",

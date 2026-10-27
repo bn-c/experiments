@@ -1,8 +1,10 @@
-"""MNIST-1D loader (Greydanus et al.) with offline synthetic stand-in.
+"""MNIST-1D loader (Greydanus et al.).
 
-Primary path: download+cache the official ``mnist1d_data.pkl``.
-Fallback (``source: synthetic`` or download failure): a tiny template-based
-1D-digit generator with the same shapes so smoke runs stay offline.
+Default source is HuggingFace ``christopher/mnist1d`` (Hub mirror of the
+official pickle). Fallbacks, in order when requested or on failure:
+
+* ``pickle`` — Greydanus GitHub ``mnist1d_data.pkl`` (offline / legacy)
+* ``synthetic`` — tiny in-repo template stand-in (always offline)
 """
 
 from __future__ import annotations
@@ -16,13 +18,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-# Official pickle shipped by greydanus/mnist1d
-_MNIST1D_URL = (
+# Real Hub id (verified): community mirror of the Greydanus pickle.
+_HF_PATH = "christopher/mnist1d"
+_MNIST1D_PICKLE_URL = (
     "https://github.com/greydanus/mnist1d/raw/master/mnist1d_data.pkl"
 )
 _DEFAULT_CACHE = Path(__file__).resolve().parents[2] / "data" / "mnist1d_data.pkl"
 
-# Sequence length of the official dataset
 SEQ_LEN = 40
 N_CLASSES = 10
 
@@ -39,12 +41,53 @@ class _ArrayDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
+def _split_slice(split: str, limit: int | None) -> str:
+    if limit is None:
+        return split
+    return f"{split}[:{int(limit)}]"
+
+
+def _from_hf(
+    hf_path: str,
+    max_train: int | None,
+    max_test: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    from datasets import load_dataset
+
+    train = load_dataset(hf_path, split=_split_slice("train", max_train))
+    test = load_dataset(hf_path, split=_split_slice("test", max_test))
+    x_tr = np.asarray(train["x"], dtype=np.float32)
+    y_tr = np.asarray(train["y"], dtype=np.int64)
+    x_te = np.asarray(test["x"], dtype=np.float32)
+    y_te = np.asarray(test["y"], dtype=np.int64)
+    return x_tr, y_tr, x_te, y_te
+
+
 def _download_pickle(cache: Path) -> dict[str, Any]:
     cache.parent.mkdir(parents=True, exist_ok=True)
     if not cache.is_file():
-        urllib.request.urlretrieve(_MNIST1D_URL, cache)  # nosec B310 — fixed HTTPS URL
+        urllib.request.urlretrieve(_MNIST1D_PICKLE_URL, cache)  # nosec B310 — fixed HTTPS URL
     with cache.open("rb") as f:
         return pickle.load(f)
+
+
+def _from_pickle(
+    cache: Path,
+    max_train: int | None,
+    max_test: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    data = _download_pickle(cache)
+    x_tr = np.asarray(data["x"], dtype=np.float32)
+    y_tr = np.asarray(data["y"], dtype=np.int64)
+    x_te = np.asarray(data["x_test"], dtype=np.float32)
+    y_te = np.asarray(data["y_test"], dtype=np.int64)
+    if max_train is not None:
+        m = int(max_train)
+        x_tr, y_tr = x_tr[:m], y_tr[:m]
+    if max_test is not None:
+        m = int(max_test)
+        x_te, y_te = x_te[:m], y_te[:m]
+    return x_tr, y_tr, x_te, y_te
 
 
 def _synthetic_mnist1d(
@@ -52,7 +95,7 @@ def _synthetic_mnist1d(
     n_test: int,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Faithful tiny stand-in: class-conditional bumps + noise/scale/shift."""
+    """Tiny template-based stand-in (offline only; not the official dataset)."""
     rng = np.random.default_rng(seed)
     t = np.linspace(0.0, 1.0, SEQ_LEN, dtype=np.float32)
 
@@ -60,7 +103,6 @@ def _synthetic_mnist1d(
         y = rng.integers(0, N_CLASSES, size=n)
         x = np.zeros((n, SEQ_LEN), dtype=np.float32)
         for i, label in enumerate(y):
-            # Digits as localized Gaussians at class-dependent centers + harmonics
             center = 0.1 + 0.08 * int(label)
             width = 0.04 + 0.01 * (int(label) % 3)
             bump = np.exp(-0.5 * ((t - center) / width) ** 2)
@@ -79,9 +121,12 @@ def _synthetic_mnist1d(
 
 def load_mnist1d(kwargs: dict[str, Any]) -> tuple[Dataset, Dataset, dict[str, Any]]:
     seed = int(kwargs.get("seed", 0))
-    source = str(kwargs.get("source", "official"))  # official | synthetic
+    # Default: HuggingFace. Legacy alias "official" → hf.
+    source = str(kwargs.get("source", "hf")).lower()
+    if source == "official":
+        source = "hf"
+    hf_path = str(kwargs.get("hf_path", _HF_PATH))
     cache = Path(kwargs.get("cache", _DEFAULT_CACHE))
-    # Optional subset for fast smoke (None = full)
     max_train = kwargs.get("max_train")
     max_test = kwargs.get("max_test")
 
@@ -90,35 +135,42 @@ def load_mnist1d(kwargs: dict[str, Any]) -> tuple[Dataset, Dataset, dict[str, An
         "in_dim": SEQ_LEN,
         "out_dim": N_CLASSES,
         "n_classes": N_CLASSES,
+        "hf_path": hf_path,
     }
 
     if source == "synthetic":
-        n_train = int(kwargs.get("n_train", 400))
-        n_test = int(kwargs.get("n_test", 100))
+        n_train = int(kwargs.get("n_train", max_train or 400))
+        n_test = int(kwargs.get("n_test", max_test or 100))
         x_tr, y_tr, x_te, y_te = _synthetic_mnist1d(n_train, n_test, seed)
         meta["source"] = "synthetic"
-    else:
+    elif source == "pickle":
         try:
-            data = _download_pickle(cache)
-            x_tr = np.asarray(data["x"], dtype=np.float32)
-            y_tr = np.asarray(data["y"], dtype=np.int64)
-            x_te = np.asarray(data["x_test"], dtype=np.float32)
-            y_te = np.asarray(data["y_test"], dtype=np.int64)
-            meta["source"] = "official"
-        except Exception as exc:  # noqa: BLE001 — offline / network guard
-            n_train = int(kwargs.get("n_train", 400))
-            n_test = int(kwargs.get("n_test", 100))
+            x_tr, y_tr, x_te, y_te = _from_pickle(cache, max_train, max_test)
+            meta["source"] = "pickle"
+        except Exception as exc:  # noqa: BLE001
+            n_train = int(kwargs.get("n_train", max_train or 400))
+            n_test = int(kwargs.get("n_test", max_test or 100))
             x_tr, y_tr, x_te, y_te = _synthetic_mnist1d(n_train, n_test, seed)
             meta["source"] = f"synthetic_fallback({type(exc).__name__})"
+    elif source == "hf":
+        try:
+            x_tr, y_tr, x_te, y_te = _from_hf(hf_path, max_train, max_test)
+            meta["source"] = "huggingface"
+        except Exception as exc:  # noqa: BLE001 — demote to pickle, then synthetic
+            try:
+                x_tr, y_tr, x_te, y_te = _from_pickle(cache, max_train, max_test)
+                meta["source"] = f"pickle_fallback({type(exc).__name__})"
+            except Exception as exc2:  # noqa: BLE001
+                n_train = int(kwargs.get("n_train", max_train or 400))
+                n_test = int(kwargs.get("n_test", max_test or 100))
+                x_tr, y_tr, x_te, y_te = _synthetic_mnist1d(n_train, n_test, seed)
+                meta["source"] = (
+                    f"synthetic_fallback({type(exc).__name__}+{type(exc2).__name__})"
+                )
+    else:
+        raise ValueError(f"unknown mnist1d source {source!r}; use hf|pickle|synthetic")
 
-    if max_train is not None:
-        m = int(max_train)
-        x_tr, y_tr = x_tr[:m], y_tr[:m]
-    if max_test is not None:
-        m = int(max_test)
-        x_te, y_te = x_te[:m], y_te[:m]
-
-    # Zero-mean / unit-ish scale on train stats
+    # Zero-mean / unit scale on train stats
     mean = x_tr.mean()
     std = x_tr.std() + 1e-6
     x_tr = (x_tr - mean) / std
