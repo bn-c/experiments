@@ -94,12 +94,12 @@ Full grid: **every domain × {linear, mlp}**. Paths listed in
 | `mnist1d` | `mnist1d_linear.json` | `mnist1d_mlp.json` | full HF MNIST-1D, 40 epochs |
 | `mnist` | `mnist_linear.json` | `mnist_mlp.json` | full MNIST, 30 epochs |
 | `fashion_mnist` | `fashion_mnist_linear.json` | `fashion_mnist_mlp.json` | full Fashion-MNIST, 30 epochs |
-| `cifar10` | `cifar10_linear.json` | `cifar10_mlp.json` | 10k train / 2k test, 20 epochs |
-| `svhn` | `svhn_linear.json` | `svhn_mlp.json` | 10k train / 2k test, 20 epochs |
+| `cifar10` | `cifar10_linear.json` | `cifar10_mlp.json` | full HF CIFAR-10, 20 epochs, batch 256 |
+| `svhn` | `svhn_linear.json` | `svhn_mlp.json` | full HF SVHN cropped_digits, 20 epochs, batch 256 |
 | `synthetic_lrb` | `synthetic_lrb_linear.json` | `synthetic_lrb_mlp.json` | 8k train, 50 epochs |
 
 Default knobs: linear `lr=0.01`; MLP `width=256`, `depth=2`, `relu`, `lr=0.001`.
-Batch 128, seed 0, device cpu. Smoke JSON stays tiny + W&B off.
+Batch 128 (CIFAR-10 / SVHN: 256), seed 0, device cpu. Smoke JSON stays tiny + W&B off.
 
 ## Layout
 
