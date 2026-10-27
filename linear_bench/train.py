@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from .data import load_dataset
 from .models import build_model
+from .repr_analysis import compute_repr_metrics, fixed_probe_batch, serializable_meta
 from .wandb_util import finish_wandb, log_epoch, maybe_init_wandb, set_run_summary
 
 
@@ -104,9 +105,20 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
         seed=seed,
     )
 
+    # Per-epoch repr/DoF probes — default on (tiny matrices / fixed probe batch).
+    repr_on = bool(cfg.get("repr_analysis", True))
+    probe_x = probe_y = None
+    if repr_on:
+        probe_x, probe_y = fixed_probe_batch(
+            test_loader,
+            device=device,
+            max_samples=int(cfg.get("repr_max_samples", 256)),
+        )
+
     history: list[dict[str, float]] = []
     last_train: dict[str, float] = {}
     last_val: dict[str, float] = {}
+    last_repr: dict[str, float] = {}
     t0 = time.perf_counter()
     try:
         for epoch in range(1, epochs + 1):
@@ -127,12 +139,22 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
             # Train-set metric after the epoch (same compute as val; cheap at these sizes).
             train_ev = evaluate(model, train_loader, task, device)
             ev = evaluate(model, test_loader, task, device)
+            repr_m: dict[str, float] = {}
+            if repr_on and probe_x is not None:
+                repr_m = compute_repr_metrics(
+                    model,
+                    probe_x=probe_x,
+                    probe_y=probe_y,
+                    meta=meta,
+                )
+                last_repr = repr_m
             epoch_sec = time.perf_counter() - t_ep
             row: dict[str, float] = {
                 "epoch": float(epoch),
                 "train_loss": train_loss,
                 "epoch_sec": round(epoch_sec, 4),
                 **ev,
+                **repr_m,
             }
             if primary == "acc" and "acc" in train_ev:
                 row["train_acc"] = train_ev["acc"]
@@ -148,6 +170,7 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
                     val_metrics=ev,
                     primary=primary,
                     epoch_sec=epoch_sec,
+                    extra=repr_m or None,
                 )
     finally:
         elapsed = time.perf_counter() - t0
@@ -171,12 +194,14 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
         "device": str(device),
         "elapsed_sec": round(elapsed, 4),
         "n_params": n_params,
-        "meta": meta,
+        "meta": serializable_meta(meta),
         "final": {k: v for k, v in final.items() if k != "epoch"},
         "primary_metric": primary,
         "primary_value": final.get(primary),
         "history": history,
         "wandb": bool(wandb_on),
+        "repr_analysis": repr_on,
+        "repr_final": last_repr,
     }
     return metrics
 

@@ -13,8 +13,8 @@ Dashboard UX (one project ``linear-bench``):
 - **config** holds dataset / model / seed / task / hyperparams
   (incl. ``optimizer``, ``weight_decay``)
 - **metrics** stay schema-only: ``train/loss``, ``train/acc``|``train/mse``,
-  ``val/loss``, ``val/acc``|``val/mse``, ``time/epoch_sec`` — no domain/model
-  keys in the chart series
+  ``val/loss``, ``val/acc``|``val/mse``, ``time/epoch_sec``, plus optional
+  ``repr/*`` DoF probes — no domain/model keys in the chart series
 - **summary** once at end: ``summary/train_acc``|``summary/train_mse``,
   matching ``summary/val_*``, plus ``summary/wall_sec`` for table compare
 """
@@ -120,8 +120,9 @@ def epoch_metric_payload(
     val_metrics: dict[str, float],
     primary: str,
     epoch_sec: float | None = None,
+    extra: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Flat ``train/*`` / ``val/*`` / ``time/*`` keys for one epoch (no domain/model in names)."""
+    """Flat ``train/*`` / ``val/*`` / ``time/*`` / ``repr/*`` keys (no domain/model in names)."""
     payload: dict[str, float] = {
         "train/loss": float(train_loss),
         "val/loss": float(val_metrics["loss"]),
@@ -139,6 +140,9 @@ def epoch_metric_payload(
             payload["val/mse"] = float(val_metrics["mse"])
     if epoch_sec is not None:
         payload["time/epoch_sec"] = float(epoch_sec)
+    if extra:
+        for k, v in extra.items():
+            payload[str(k)] = float(v)
     return payload
 
 
@@ -150,8 +154,9 @@ def log_epoch(
     val_metrics: dict[str, float],
     primary: str,
     epoch_sec: float | None = None,
+    extra: dict[str, float] | None = None,
 ) -> None:
-    """Log one epoch: train/val loss + acc|mse, optional ``time/epoch_sec``."""
+    """Log one epoch: train/val loss + acc|mse, optional ``time/epoch_sec`` + ``repr/*``."""
     if not _WANDB or wandb.run is None:
         return
     wandb.log(
@@ -161,6 +166,7 @@ def log_epoch(
             val_metrics=val_metrics,
             primary=primary,
             epoch_sec=epoch_sec,
+            extra=extra,
         ),
         step=epoch,
     )

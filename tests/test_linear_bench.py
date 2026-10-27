@@ -50,6 +50,20 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert metrics["final"]["epoch_sec"] > 0
     # synthetic_lrb is intentionally local (no Hub corpus)
     assert "huggingface" not in str(metrics["meta"].get("source", ""))
+    # Per-epoch repr probes (default on); LRB also emits feature_align.
+    assert metrics["repr_analysis"] is True
+    for key in (
+        "repr/weight_eff_rank",
+        "repr/weight_rank_ratio",
+        "repr/act_participation_ratio",
+        "repr/dead_frac",
+        "repr/feature_align",
+    ):
+        assert key in metrics["history"][0]
+        assert key in metrics["final"]
+        assert isinstance(metrics["history"][0][key], float)
+    assert "W_true" not in metrics["meta"]
+    assert metrics["meta"].get("W_true_shape") == [16, 24]
 
     out = tmp_path / "metrics.json"
     write_metrics(metrics, out)
@@ -58,6 +72,8 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert loaded["final"]["mse"] == loaded["primary_value"]
     assert "train_mse" in loaded["history"][0]
     assert "epoch_sec" in loaded["history"][0]
+    assert "repr/weight_eff_rank" in loaded["history"][0]
+    assert "repr/feature_align" in loaded["final"]
 
 
 def test_wandb_resolve_default_off_and_cli_overrides():
@@ -86,6 +102,7 @@ def test_epoch_metric_payload_classification_keys():
         val_metrics={"loss": 0.6, "acc": 0.8},
         primary="acc",
         epoch_sec=1.25,
+        extra={"repr/weight_eff_rank": 2.5, "repr/dead_frac": 0.0},
     )
     assert payload == {
         "train/loss": 0.5,
@@ -93,8 +110,38 @@ def test_epoch_metric_payload_classification_keys():
         "val/loss": 0.6,
         "val/acc": 0.8,
         "time/epoch_sec": 1.25,
+        "repr/weight_eff_rank": 2.5,
+        "repr/dead_frac": 0.0,
     }
     assert not any(k.startswith("summary/") for k in payload)
+
+
+def test_repr_smoke_epoch_emits_keys():
+    """One smoke epoch must emit core ``repr/`` keys (classification path, no LRB)."""
+    cfg = {
+        "dataset": "mnist1d",
+        "data": {"source": "synthetic", "n_train": 64, "n_test": 32, "seed": 2},
+        "model": {"name": "linear"},
+        "epochs": 1,
+        "batch_size": 32,
+        "lr": 0.05,
+        "seed": 2,
+        "device": "cpu",
+    }
+    metrics = train_one(cfg)
+    row = metrics["history"][0]
+    for key in (
+        "repr/weight_eff_rank",
+        "repr/weight_rank_ratio",
+        "repr/act_participation_ratio",
+        "repr/dead_frac",
+    ):
+        assert key in row
+        assert isinstance(row[key], float)
+    # No ground-truth dictionary on mnist1d → feature_align omitted.
+    assert "repr/feature_align" not in row
+    assert 0.0 <= row["repr/dead_frac"] <= 1.0
+    assert row["repr/weight_rank_ratio"] >= 0.0
 
 
 def test_epoch_metric_payload_regression_keys():
