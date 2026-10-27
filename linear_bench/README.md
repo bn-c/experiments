@@ -55,11 +55,11 @@ WANDB_MODE=offline python -m linear_bench --config … --wandb
 
 | Axis | Value | Use |
 | --- | --- | --- |
-| **name** | `{dataset}-{model}` e.g. `mnist-linear` | Scan the run list |
+| **name** | `{dataset}-linear` or `{dataset}-mlp-{activation}` | Scan the run list |
 | **group** | dataset (`mnist`, `cifar10`, …) | Compare models within one domain |
 | **job_type** | model (`linear`, `mlp`) | Filter formulation |
-| **tags** | dataset, model, task, `seed-N` | Sidebar filters |
-| **config** | dataset, model, seed, task, hyperparams | Run detail / parallel coords |
+| **tags** | dataset, model, task, `seed-N`, (+ activation for MLP) | Sidebar filters |
+| **config** | dataset, model, seed, task, hyperparams (+ flat `activation` for MLP) | Run detail / parallel coords |
 | **metrics** | `train/loss`, `train/acc`\|`train/mse`, `val/loss`, `val/acc`\|`val/mse`, `time/epoch_sec` (cumulative wall from train start), `repr/*`; summary: `summary/train_*`, `summary/val_*`, `summary/wall_sec` | Shared chart keys across runs |
 
 Domain and model live in name/tags/group/config — **not** as metric keys — so
@@ -89,7 +89,11 @@ Full grid: **every domain × {linear, mlp}**. Paths listed in
 `configs/baseline_grid.txt` for the desk runner. All baselines set
 `"wandb": true` (desk can still pass `--wandb` / `--no-wandb`).
 
-| domain | linear | mlp | notes |
+MLP activation sweep: **every domain × {relu, gelu, tanh, silu}** (24 configs) in
+`configs/activation_grid.txt`. ReLU uses the existing `*_mlp.json`; others are
+`*_mlp_{gelu,tanh,silu}.json` with the same width/depth/lr/epochs/data.
+
+| domain | linear | mlp (relu) | notes |
 | --- | --- | --- | --- |
 | `mnist1d` | `mnist1d_linear.json` | `mnist1d_mlp.json` | full HF MNIST-1D, 40 epochs |
 | `mnist` | `mnist_linear.json` | `mnist_mlp.json` | full MNIST, 30 epochs |
@@ -98,7 +102,7 @@ Full grid: **every domain × {linear, mlp}**. Paths listed in
 | `svhn` | `svhn_linear.json` | `svhn_mlp.json` | full HF SVHN cropped_digits, 20 epochs, batch 256 |
 | `synthetic_lrb` | `synthetic_lrb_linear.json` | `synthetic_lrb_mlp.json` | 8k train, 50 epochs |
 
-Default knobs: linear `lr=0.01`; MLP `width=256`, `depth=2`, `relu`, `lr=0.001`.
+Default knobs: linear `lr=0.01`; MLP `width=256`, `depth=2`, `relu` (or gelu/tanh/silu), `lr=0.001`.
 Batch 128 (CIFAR-10 / SVHN: 256), seed 0, device cpu. Smoke JSON stays tiny + W&B off.
 
 ## Layout

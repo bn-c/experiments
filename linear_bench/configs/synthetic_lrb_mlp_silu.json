@@ -1,0 +1,25 @@
+{
+  "dataset": "synthetic_lrb",
+  "data": {
+    "n": 64,
+    "n_p": 128,
+    "sparsity": 0.1,
+    "noise": 0.05,
+    "n_train": 8192,
+    "n_test": 2048,
+    "seed": 0
+  },
+  "model": {
+    "name": "mlp",
+    "width": 256,
+    "depth": 2,
+    "activation": "silu"
+  },
+  "epochs": 50,
+  "batch_size": 128,
+  "lr": 0.001,
+  "seed": 0,
+  "device": "cpu",
+  "wandb": true,
+  "out": "outputs/linear_bench/synthetic_lrb_mlp_silu.json"
+}

@@ -11,6 +11,7 @@ from linear_bench.data import HF_PRESETS, REGISTRY
 from linear_bench.train import train_one, write_metrics
 from linear_bench.wandb_util import (
     epoch_metric_payload,
+    mlp_activation,
     resolve_wandb_enabled,
     run_name,
     run_tags,
@@ -118,13 +119,27 @@ def test_wandb_resolve_default_off_and_cli_overrides():
 
 def test_wandb_run_name_and_tags():
     assert run_name("mnist", "linear") == "mnist-linear"
-    assert run_name("cifar10", "mlp") == "cifar10-mlp"
+    assert run_name("cifar10", "mlp", "relu") == "cifar10-mlp-relu"
+    assert run_name("mnist", "mlp", "gelu") == "mnist-mlp-gelu"
     assert run_tags(dataset="mnist", model="linear", task="classification", seed=0) == [
         "mnist",
         "linear",
         "classification",
         "seed-0",
     ]
+    assert run_tags(
+        dataset="cifar10",
+        model="mlp",
+        task="classification",
+        seed=0,
+        activation="silu",
+    ) == ["cifar10", "mlp", "classification", "seed-0", "silu"]
+
+
+def test_mlp_activation_from_cfg():
+    assert mlp_activation({"model": {"name": "linear"}}, "linear") is None
+    assert mlp_activation({"model": {"name": "mlp", "activation": "GELU"}}, "mlp") == "gelu"
+    assert mlp_activation({"model": {"name": "mlp"}}, "mlp") == "relu"
 
 
 def test_epoch_metric_payload_classification_keys():

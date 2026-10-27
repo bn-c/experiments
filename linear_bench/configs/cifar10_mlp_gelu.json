@@ -1,0 +1,17 @@
+{
+  "dataset": "cifar10",
+  "data": {},
+  "model": {
+    "name": "mlp",
+    "width": 256,
+    "depth": 2,
+    "activation": "gelu"
+  },
+  "epochs": 20,
+  "batch_size": 256,
+  "lr": 0.001,
+  "seed": 0,
+  "device": "cpu",
+  "wandb": true,
+  "out": "outputs/linear_bench/cifar10_mlp_gelu.json"
+}
