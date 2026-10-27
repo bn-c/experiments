@@ -97,6 +97,7 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
         model_name=model_name,
         task=task,
         n_params=n_params,
+        seed=seed,
     )
 
     history: list[dict[str, float]] = []
@@ -124,8 +125,6 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
                     epoch=epoch,
                     train_loss=train_loss,
                     val_metrics=ev,
-                    dataset=dataset_name,
-                    model_type=model_name,
                     primary=primary,
                 )
     finally:
