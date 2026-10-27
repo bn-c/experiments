@@ -1,0 +1,21 @@
+{
+  "dataset": "mnist1d",
+  "data": {
+    "source": "hf",
+    "hf_path": "christopher/mnist1d",
+    "max_train": 256,
+    "max_test": 64
+  },
+  "model": {
+    "name": "mlp",
+    "width": 64,
+    "depth": 2,
+    "activation": "relu"
+  },
+  "epochs": 2,
+  "batch_size": 64,
+  "lr": 0.01,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/smoke_mnist1d.json"
+}

@@ -1,0 +1,18 @@
+{
+  "dataset": "mnist1d",
+  "data": {
+    "source": "synthetic",
+    "n_train": 256,
+    "n_test": 64,
+    "seed": 0
+  },
+  "model": {
+    "name": "linear"
+  },
+  "epochs": 1,
+  "batch_size": 64,
+  "lr": 0.05,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/smoke_mnist1d_synthetic.json"
+}
