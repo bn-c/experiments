@@ -6,6 +6,8 @@ __pycache__/
 checkpoints/
 # Root-level downloads only; keep sfprm_miniarc/data/*.py tracked.
 /data/
+# linear_bench MNIST-1D pickle cache (also under /data/ when default path used)
+linear_bench/.cache/
 sfprm_miniarc/data/mini_arc/*.json
 sfprm_miniarc/data/mini_arc/_extract/
 sfprm_miniarc/checkpoints/

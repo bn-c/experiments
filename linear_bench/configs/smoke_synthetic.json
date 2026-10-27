@@ -1,0 +1,21 @@
+{
+  "dataset": "synthetic_lrb",
+  "data": {
+    "n": 32,
+    "n_p": 64,
+    "sparsity": 0.1,
+    "noise": 0.05,
+    "n_train": 512,
+    "n_test": 128,
+    "seed": 0
+  },
+  "model": {
+    "name": "linear"
+  },
+  "epochs": 3,
+  "batch_size": 64,
+  "lr": 0.05,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/smoke_synthetic.json"
+}
