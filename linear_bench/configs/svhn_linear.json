@@ -1,14 +1,11 @@
 {
   "dataset": "svhn",
-  "data": {
-    "max_train": 10000,
-    "max_test": 2000
-  },
+  "data": {},
   "model": {
     "name": "linear"
   },
   "epochs": 20,
-  "batch_size": 128,
+  "batch_size": 256,
   "lr": 0.01,
   "seed": 0,
   "device": "cpu",
