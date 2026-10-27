@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from .data import load_dataset
 from .models import build_model
-from .wandb_util import finish_wandb, log_epoch, maybe_init_wandb
+from .wandb_util import finish_wandb, log_epoch, maybe_init_wandb, set_run_summary
 
 
 def set_seed(seed: int) -> None:
@@ -105,9 +105,12 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
     )
 
     history: list[dict[str, float]] = []
+    last_train: dict[str, float] = {}
+    last_val: dict[str, float] = {}
     t0 = time.perf_counter()
     try:
         for epoch in range(1, epochs + 1):
+            t_ep = time.perf_counter()
             model.train()
             running = 0.0
             n_ex = 0
@@ -121,21 +124,42 @@ def train_one(cfg: dict[str, Any]) -> dict[str, Any]:
                 running += float(loss.item()) * int(x.shape[0])
                 n_ex += int(x.shape[0])
             train_loss = running / max(n_ex, 1)
+            # Train-set metric after the epoch (same compute as val; cheap at these sizes).
+            train_ev = evaluate(model, train_loader, task, device)
             ev = evaluate(model, test_loader, task, device)
-            row = {"epoch": float(epoch), "train_loss": train_loss, **ev}
+            epoch_sec = time.perf_counter() - t_ep
+            row: dict[str, float] = {
+                "epoch": float(epoch),
+                "train_loss": train_loss,
+                "epoch_sec": round(epoch_sec, 4),
+                **ev,
+            }
+            if primary == "acc" and "acc" in train_ev:
+                row["train_acc"] = train_ev["acc"]
+            if primary == "mse" and "mse" in train_ev:
+                row["train_mse"] = train_ev["mse"]
             history.append(row)
+            last_train, last_val = train_ev, ev
             if wandb_on:
                 log_epoch(
                     epoch=epoch,
                     train_loss=train_loss,
+                    train_metrics=train_ev,
                     val_metrics=ev,
                     primary=primary,
+                    epoch_sec=epoch_sec,
                 )
     finally:
+        elapsed = time.perf_counter() - t0
         if wandb_on:
+            set_run_summary(
+                train_metrics=last_train,
+                val_metrics=last_val,
+                primary=primary,
+                wall_sec=elapsed,
+            )
             finish_wandb()
 
-    elapsed = time.perf_counter() - t0
     final = history[-1] if history else {}
     metrics: dict[str, Any] = {
         "dataset": dataset_name,

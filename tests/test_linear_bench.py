@@ -9,7 +9,12 @@ import pytest
 
 from linear_bench.data import HF_PRESETS, REGISTRY
 from linear_bench.train import train_one, write_metrics
-from linear_bench.wandb_util import resolve_wandb_enabled, run_name, run_tags
+from linear_bench.wandb_util import (
+    epoch_metric_payload,
+    resolve_wandb_enabled,
+    run_name,
+    run_tags,
+)
 
 
 def test_smoke_train_writes_metric(tmp_path: Path):
@@ -39,6 +44,10 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     assert metrics["wandb"] is False  # smoke stays offline / no W&B
     assert cfg["optimizer"] == "AdamW"
     assert cfg["weight_decay"] == 0.01  # default when omitted
+    assert metrics["elapsed_sec"] > 0
+    assert "train_mse" in metrics["final"]
+    assert "epoch_sec" in metrics["final"]
+    assert metrics["final"]["epoch_sec"] > 0
     # synthetic_lrb is intentionally local (no Hub corpus)
     assert "huggingface" not in str(metrics["meta"].get("source", ""))
 
@@ -47,6 +56,8 @@ def test_smoke_train_writes_metric(tmp_path: Path):
     loaded = json.loads(out.read_text())
     assert "primary_value" in loaded
     assert loaded["final"]["mse"] == loaded["primary_value"]
+    assert "train_mse" in loaded["history"][0]
+    assert "epoch_sec" in loaded["history"][0]
 
 
 def test_wandb_resolve_default_off_and_cli_overrides():
@@ -68,6 +79,43 @@ def test_wandb_run_name_and_tags():
     ]
 
 
+def test_epoch_metric_payload_classification_keys():
+    payload = epoch_metric_payload(
+        train_loss=0.5,
+        train_metrics={"loss": 0.4, "acc": 0.9},
+        val_metrics={"loss": 0.6, "acc": 0.8},
+        primary="acc",
+        epoch_sec=1.25,
+    )
+    assert payload == {
+        "train/loss": 0.5,
+        "train/acc": 0.9,
+        "val/loss": 0.6,
+        "val/acc": 0.8,
+        "time/epoch_sec": 1.25,
+    }
+    assert not any(k.startswith("summary/") for k in payload)
+
+
+def test_epoch_metric_payload_regression_keys():
+    payload = epoch_metric_payload(
+        train_loss=0.12,
+        train_metrics={"loss": 0.11, "mse": 0.11},
+        val_metrics={"loss": 0.15, "mse": 0.15},
+        primary="mse",
+        epoch_sec=0.5,
+    )
+    assert set(payload) == {
+        "train/loss",
+        "train/mse",
+        "val/loss",
+        "val/mse",
+        "time/epoch_sec",
+    }
+    assert payload["train/mse"] == 0.11
+    assert payload["val/mse"] == 0.15
+
+
 def test_mnist1d_synthetic_offline_smoke():
     cfg = {
         "dataset": "mnist1d",
@@ -83,6 +131,9 @@ def test_mnist1d_synthetic_offline_smoke():
     assert metrics["meta"]["source"] == "synthetic"
     assert metrics["primary_metric"] == "acc"
     assert 0.0 <= float(metrics["primary_value"]) <= 1.0
+    assert "train_acc" in metrics["final"]
+    assert 0.0 <= float(metrics["final"]["train_acc"]) <= 1.0
+    assert metrics["elapsed_sec"] > 0
 
 
 def test_mnist1d_hf_default_smoke():
