@@ -1,0 +1,13 @@
+{
+  "dataset": "fashion_mnist",
+  "data": {},
+  "model": {
+    "name": "linear"
+  },
+  "epochs": 30,
+  "batch_size": 128,
+  "lr": 0.01,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/fashion_mnist_linear.json"
+}

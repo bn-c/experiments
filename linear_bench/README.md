@@ -26,15 +26,54 @@ Override seed/epochs/device without editing the file:
 python -m linear_bench --config linear_bench/configs/smoke_hf_mnist.json --epochs 1 --seed 1
 ```
 
+## Weights & Biases
+
+Opt-in (default **off** — smoke/CI never need W&B). Same soft-import pattern as
+SFPRM: install `wandb` when you want logging; without `WANDB_API_KEY` runs go
+**offline** (local `wandb/` dir).
+
+```bash
+# flag
+python -m linear_bench --config linear_bench/configs/mnist1d_linear.json --wandb
+
+# or in JSON: "wandb": true, optional "wandb_project": "linear-bench"
+python -m linear_bench --config path/to.json   # if config has wandb: true
+
+# disable even if config enables
+python -m linear_bench --config path/to.json --no-wandb
+
+# project / entity / offline
+WANDB_API_KEY=… python -m linear_bench --config … --wandb --wandb-project linear-bench
+WANDB_MODE=offline python -m linear_bench --config … --wandb
+```
+
+Logged: full config, `dataset`, `model_type`, `num_params`, per-epoch
+`train/loss`, `val/loss`, plus `val/acc` (classification) or `val/mse` (LRB).
+Default project: `linear-bench`.
+
+## Baseline configs (not smoke)
+
+| config | notes |
+| --- | --- |
+| `configs/mnist1d_linear.json` | full HF MNIST-1D, 40 epochs |
+| `configs/mnist_linear.json` | full MNIST, 30 epochs |
+| `configs/fashion_mnist_linear.json` | full Fashion-MNIST, 30 epochs |
+| `configs/cifar10_mlp.json` | 10k train / MLP, 20 epochs |
+| `configs/svhn_mlp.json` | 10k train / MLP, 20 epochs |
+| `configs/synthetic_lrb_linear.json` | 8k samples, 50 epochs |
+
+Desk-scale; leave long runs to a desk worker. Smoke JSON stays tiny + W&B off.
+
 ## Layout
 
 ```text
 linear_bench/
 ├── __main__.py          # python -m linear_bench
 ├── train.py             # config → train → metrics
+├── wandb_util.py        # optional W&B (soft import)
 ├── models/              # registry: linear, mlp
 ├── data/                # mnist1d, synthetic_lrb, hf_vision
-└── configs/             # smoke + small defaults
+└── configs/             # smoke + baselines
 ```
 
 ## Add a formulation

@@ -1,0 +1,19 @@
+{
+  "dataset": "svhn",
+  "data": {
+    "max_train": 10000,
+    "max_test": 2000
+  },
+  "model": {
+    "name": "mlp",
+    "width": 256,
+    "depth": 2,
+    "activation": "relu"
+  },
+  "epochs": 20,
+  "batch_size": 128,
+  "lr": 0.001,
+  "seed": 0,
+  "device": "cpu",
+  "out": "outputs/linear_bench/svhn_mlp.json"
+}
