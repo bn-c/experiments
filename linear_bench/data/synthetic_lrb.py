@@ -84,5 +84,8 @@ def load_synthetic_lrb(kwargs: dict[str, Any]) -> tuple[Dataset, Dataset, dict[s
         "n_test": n_test,
         # Frobenius scale of A for optional diagnostics
         "A_fro": float(np.linalg.norm(A)),
+        # Ground-truth dictionary for repr/feature_align (runtime only; stripped from JSON).
+        "W_true": A,
+        "A": A,
     }
     return _RecoveryDataset(x_tr, z_tr), _RecoveryDataset(x_te, z_te), meta

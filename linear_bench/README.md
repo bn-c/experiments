@@ -60,10 +60,28 @@ WANDB_MODE=offline python -m linear_bench --config … --wandb
 | **job_type** | model (`linear`, `mlp`) | Filter formulation |
 | **tags** | dataset, model, task, `seed-N` | Sidebar filters |
 | **config** | dataset, model, seed, task, hyperparams | Run detail / parallel coords |
-| **metrics** | `train/loss`, `train/acc`\|`train/mse`, `val/loss`, `val/acc`\|`val/mse`, `time/epoch_sec`; summary: `summary/train_*`, `summary/val_*`, `summary/wall_sec` | Shared chart keys across runs |
+| **metrics** | `train/loss`, `train/acc`\|`train/mse`, `val/loss`, `val/acc`\|`val/mse`, `time/epoch_sec`, `repr/*`; summary: `summary/train_*`, `summary/val_*`, `summary/wall_sec` | Shared chart keys across runs |
 
 Domain and model live in name/tags/group/config — **not** as metric keys — so
 charts do not mix unrelated series. Default project: `linear-bench`.
+
+## Representation / DoF probes (`repr/*`)
+
+Logged **every epoch** after val (default **on**; set `"repr_analysis": false`
+to skip). Cheap SVD on the primary weight + a fixed probe batch (cap
+`repr_max_samples`, default 256). Schema-only keys — domain still via
+group/tags.
+
+| key | meaning |
+| --- | --- |
+| `repr/weight_eff_rank` | Participation ratio of singular values of the primary weight (`linear`: that `Linear`; `mlp`: **last** Linear before logits) |
+| `repr/weight_rank_ratio` | `eff_rank / min(rows, cols)` |
+| `repr/act_participation_ratio` | Participation ratio of centered probe-batch features (`linear`: outputs; `mlp`: penultimate post-activation) |
+| `repr/dead_frac` | Fraction of units with mean \|act\| ≈ 0 on the probe batch |
+| `repr/feature_align` | **LRB only** when meta has `W_true`/`A`: mean abs row-cosine of weight vs `W_true.T` (else linear CKA vs continuous codes). Omitted on real vision sets |
+
+JSON history/final carry the same `repr/*` keys; `meta` drops the raw `W_true`
+matrix (keeps `W_true_shape`).
 
 ## Baseline configs (not smoke)
 
@@ -84,6 +102,7 @@ Desk-scale; leave long runs to a desk worker. Smoke JSON stays tiny + W&B off.
 linear_bench/
 ├── __main__.py          # python -m linear_bench
 ├── train.py             # config → train → metrics
+├── repr_analysis.py     # per-epoch weight/act/LRB probes
 ├── wandb_util.py        # optional W&B (soft import)
 ├── models/              # registry: linear, mlp
 ├── data/                # mnist1d, synthetic_lrb, hf_vision
