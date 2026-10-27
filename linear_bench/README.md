@@ -85,16 +85,21 @@ matrix (keeps `W_true_shape`).
 
 ## Baseline configs (not smoke)
 
-| config | notes |
-| --- | --- |
-| `configs/mnist1d_linear.json` | full HF MNIST-1D, 40 epochs |
-| `configs/mnist_linear.json` | full MNIST, 30 epochs |
-| `configs/fashion_mnist_linear.json` | full Fashion-MNIST, 30 epochs |
-| `configs/cifar10_mlp.json` | 10k train / MLP, 20 epochs |
-| `configs/svhn_mlp.json` | 10k train / MLP, 20 epochs |
-| `configs/synthetic_lrb_linear.json` | 8k samples, 50 epochs |
+Full grid: **every domain × {linear, mlp}**. Paths listed in
+`configs/baseline_grid.txt` for the desk runner. All baselines set
+`"wandb": true` (desk can still pass `--wandb` / `--no-wandb`).
 
-Desk-scale; leave long runs to a desk worker. Smoke JSON stays tiny + W&B off.
+| domain | linear | mlp | notes |
+| --- | --- | --- | --- |
+| `mnist1d` | `mnist1d_linear.json` | `mnist1d_mlp.json` | full HF MNIST-1D, 40 epochs |
+| `mnist` | `mnist_linear.json` | `mnist_mlp.json` | full MNIST, 30 epochs |
+| `fashion_mnist` | `fashion_mnist_linear.json` | `fashion_mnist_mlp.json` | full Fashion-MNIST, 30 epochs |
+| `cifar10` | `cifar10_linear.json` | `cifar10_mlp.json` | 10k train / 2k test, 20 epochs |
+| `svhn` | `svhn_linear.json` | `svhn_mlp.json` | 10k train / 2k test, 20 epochs |
+| `synthetic_lrb` | `synthetic_lrb_linear.json` | `synthetic_lrb_mlp.json` | 8k train, 50 epochs |
+
+Default knobs: linear `lr=0.01`; MLP `width=256`, `depth=2`, `relu`, `lr=0.001`.
+Batch 128, seed 0, device cpu. Smoke JSON stays tiny + W&B off.
 
 ## Layout
 

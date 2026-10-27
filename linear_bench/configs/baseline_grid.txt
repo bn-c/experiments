@@ -1,0 +1,14 @@
+# linear_bench baseline grid: every domain × {linear, mlp}
+# Desk runner: one path per line (skip blank / # comments).
+linear_bench/configs/mnist1d_linear.json
+linear_bench/configs/mnist1d_mlp.json
+linear_bench/configs/mnist_linear.json
+linear_bench/configs/mnist_mlp.json
+linear_bench/configs/fashion_mnist_linear.json
+linear_bench/configs/fashion_mnist_mlp.json
+linear_bench/configs/cifar10_linear.json
+linear_bench/configs/cifar10_mlp.json
+linear_bench/configs/svhn_linear.json
+linear_bench/configs/svhn_mlp.json
+linear_bench/configs/synthetic_lrb_linear.json
+linear_bench/configs/synthetic_lrb_mlp.json
