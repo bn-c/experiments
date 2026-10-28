@@ -30,6 +30,15 @@ def _resolve_device() -> torch.device:
     return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
+def _resolve_mixer(cli_mixer: str | None, ckpt_args: dict | None = None) -> str:
+    """CLI override wins; else ckpt ``args.mixer``; else ``euclid_axial``."""
+    if cli_mixer:
+        return cli_mixer
+    if ckpt_args:
+        return str(ckpt_args.get('mixer', 'euclid_axial'))
+    return 'euclid_axial'
+
+
 def _blank_and_exact(
     pred: torch.Tensor,
     solution: torch.Tensor,
@@ -129,6 +138,7 @@ def _save_ckpt(
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
+                'mixer': args.mixer,
             },
         },
         path,
@@ -174,6 +184,19 @@ def train_cmd(args: argparse.Namespace) -> None:
     )
     logger.info('DataLoader workers=%d pin_memory=%s', nw, pin)
 
+    # Peek resume ckpt before building the model so mixer matches the module tree
+    # (cross_coupled vs euclid_axial). Same pattern as eval_cmd.
+    resume_ckpt = None
+    resume_path: Path | None = None
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_file():
+            raise FileNotFoundError(f'resume checkpoint not found: {resume_path}')
+        resume_ckpt = torch.load(resume_path, map_location='cpu', weights_only=False)
+
+    ckpt_args = (resume_ckpt.get('args') or {}) if resume_ckpt is not None else None
+    args.mixer = _resolve_mixer(args.mixer, ckpt_args)
+
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -182,6 +205,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         kinetic_weight=args.kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
+        mixer=args.mixer,
     ).to(device)
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
@@ -202,22 +226,25 @@ def train_cmd(args: argparse.Namespace) -> None:
     best_blank = -1.0
     best_exact = -1.0
 
-    if args.resume:
-        resume_path = Path(args.resume)
-        if not resume_path.is_file():
-            raise FileNotFoundError(f'resume checkpoint not found: {resume_path}')
-        ckpt = torch.load(resume_path, map_location='cpu', weights_only=False)
-        model.load_state_dict(ckpt['model'])
-        if 'optimizer' in ckpt:
-            opt.load_state_dict(ckpt['optimizer'])
+    if resume_ckpt is not None:
+        assert resume_path is not None
+        model.load_state_dict(resume_ckpt['model'])
+        if 'optimizer' in resume_ckpt:
+            opt.load_state_dict(resume_ckpt['optimizer'])
             # Move optimizer state tensors to device.
             for state in opt.state.values():
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):
                         state[k] = v.to(device)
-        step = int(ckpt.get('step', 0))
-        best_blank = float(ckpt.get('best_blank', -1.0))
-        logger.info('Resumed from %s at step %d (best_blank=%.4f)', resume_path, step, best_blank)
+        step = int(resume_ckpt.get('step', 0))
+        best_blank = float(resume_ckpt.get('best_blank', -1.0))
+        logger.info(
+            'Resumed from %s at step %d (best_blank=%.4f, mixer=%s)',
+            resume_path,
+            step,
+            best_blank,
+            args.mixer,
+        )
 
     sched = None
     if args.lr_schedule == 'cosine':
@@ -253,6 +280,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
+                'mixer': args.mixer,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -463,6 +491,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'WALL_S={wall_s:.2f}')
     print(f'MAX_VRAM_GB={max_vram_gb:.3f}')
     print(f'COMPILE={int(args.compile)}')
+    print(f'MIXER={args.mixer}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -471,11 +500,13 @@ def eval_cmd(args: argparse.Namespace) -> None:
     """Evaluate a checkpoint on HF test (or train-head holdout)."""
     device = _resolve_device()
     ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt.get('args') or {})
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
+        mixer=mixer,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -548,6 +579,13 @@ def main() -> None:
         help='Average blank NLL over ODE steps (default: final state only)',
     )
     t.add_argument(
+        '--mixer',
+        type=str,
+        default=None,
+        choices=['euclid_axial', 'cross_coupled'],
+        help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -576,6 +614,13 @@ def main() -> None:
     e.add_argument('--n-heads', type=int, default=4)
     e.add_argument('--num-steps', type=int, default=8)
     e.add_argument('--dt', type=float, default=0.5)
+    e.add_argument(
+        '--mixer',
+        type=str,
+        default=None,
+        choices=['euclid_axial', 'cross_coupled'],
+        help='override mixer; default reads ckpt args',
+    )
 
     args = parser.parse_args()
     if args.command == 'train':
