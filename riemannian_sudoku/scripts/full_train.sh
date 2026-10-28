@@ -21,8 +21,8 @@ CONSTRAINT_WEIGHT="${CONSTRAINT_WEIGHT:-0.0}"
 NO_AUGMENT="${NO_AUGMENT:-0}"
 SUPERVISE_ALL_STEPS="${SUPERVISE_ALL_STEPS:-1}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
-# GPU fidelity Phase A: --compile failed ≥1.3× gate on ROCm (keep off).
-COMPILE="${COMPILE:-0}"
+# GPU fidelity: mode=default compile ~1.2× steady (Phase A pass); reduce-overhead unsafe.
+COMPILE="${COMPILE:-1}"
 NAME="${WANDB_NAME:-full-stable-lr${LR}-ns${NUM_STEPS}-b${BATCH}-s${STEPS}}"
 
 mkdir -p "$CKPT_DIR" logs

@@ -44,17 +44,17 @@ case "$PHASE" in
   B2k)
     STEPS="${STEPS:-2000}"
     BATCH=128
-    LR_B="$(python3 -c "print(f'{1e-4 * (128/64)**0.5:.6g}')")"
+    LR_B="$(uv run python -c "print(f'{1e-4 * (128/64)**0.5:.6g}')")"
     run_one "B-compile-b${BATCH}-s${STEPS}-lr${LR_B}" \
       --steps "$STEPS" --batch-size "$BATCH" --lr "$LR_B" --compile
     ;;
   B20k)
     STEPS="${STEPS:-20000}"
     BATCH=128
-    LR_B="$(python3 -c "print(f'{1e-4 * (128/64)**0.5:.6g}')")"
+    LR_B="$(uv run python -c "print(f'{1e-4 * (128/64)**0.5:.6g}')")"
     run_one "B-compile-b${BATCH}-s${STEPS}-lr${LR_B}" \
       --steps "$STEPS" --batch-size "$BATCH" --lr "$LR_B" --compile \
-      --ckpt-every 1000
+      --ckpt-every 1000 --early-stop-drop 0.15 --early-stop-patience 2
     ;;
   *)
     echo "usage: $0 A|B2k|B20k" >&2
