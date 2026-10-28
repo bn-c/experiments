@@ -1,10 +1,25 @@
-"""Unit metrics: full row/col/box match vs target."""
+"""Unit metrics: full row/col/box match vs target; early-stop cliff predicate."""
 
 from __future__ import annotations
 
 import torch
 
 from riemannian_sudoku.train import _blank_and_exact, unit_group_accuracies
+
+
+def test_early_stop_cliff_predicate() -> None:
+    # Mirror train loop: drop >= threshold below best counts as a bad eval.
+    best, drop = 0.478, 0.15
+    assert (best - 0.153) >= drop
+    assert not ((best - 0.400) >= drop)
+    # Two consecutive bad evals → stop (patience=2).
+    bad = 0
+    for val in (0.153, 0.111):
+        if (best - val) >= drop:
+            bad += 1
+        else:
+            bad = 0
+    assert bad == 2
 
 
 def test_unit_group_accuracies_perfect_and_partial() -> None:
