@@ -64,19 +64,18 @@ class SudokuDataset:
     def __init__(self, dataset_id: str = HF_DATASET_ID, data_dir: Path | None = None) -> None:
         settings = DataSettings()
         self.dataset_id = dataset_id
+        # data_dir retained for API compatibility; downloads use HF default cache.
         self._data_dir = data_dir or settings.data_dir
-        self._cache_dir = self._data_dir / 'hf_cache'
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _csv_path(self, split: str) -> Path:
         if split not in _SPLIT_FILES:
             msg = f'Unknown split {split!r}; expected one of {sorted(_SPLIT_FILES)}'
             raise ValueError(msg)
+        # Omit cache_dir → huggingface_hub uses $HF_HOME / ~/.cache/huggingface.
         path = hf_hub_download(
             repo_id=self.dataset_id,
             filename=_SPLIT_FILES[split],
             repo_type='dataset',
-            cache_dir=str(self._cache_dir),
         )
         return Path(path)
 

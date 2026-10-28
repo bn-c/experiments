@@ -1,0 +1,57 @@
+[project]
+name = "riemannian-sudoku"
+version = "0.1.0"
+description = "Riemannian Sudoku spike: axial attention on S⁸₊ with T³ PE (sapientinc/sudoku-extreme)"
+readme = "README.md"
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    "huggingface-hub>=0.26.0",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "torch>=2.4.0",
+    "tqdm>=4.66.0",
+    "wandb>=0.24.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest >= 9.0.1",
+    "ruff >= 0.14.6",
+]
+
+[project.optional-dependencies]
+rocm = [
+    "pytorch-triton-rocm",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "riemannian_sudoku"
+
+[project.scripts]
+riemannian-sudoku = "riemannian_sudoku.train:main"
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm-nightly" }
+pytorch-triton-rocm = { index = "pytorch-rocm-nightly" }
+
+[tool.uv]
+prerelease = "allow"
+
+[[tool.uv.index]]
+name = "pytorch-rocm-nightly"
+url = "https://download.pytorch.org/whl/nightly/rocm6.4"
+explicit = true
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--maxfail=3"]
