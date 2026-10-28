@@ -129,6 +129,7 @@ def _save_ckpt(
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
+                'mixer': args.mixer,
             },
         },
         path,
@@ -182,6 +183,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         kinetic_weight=args.kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
+        mixer=args.mixer,
     ).to(device)
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
@@ -253,6 +255,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
+                'mixer': args.mixer,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -463,6 +466,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'WALL_S={wall_s:.2f}')
     print(f'MAX_VRAM_GB={max_vram_gb:.3f}')
     print(f'COMPILE={int(args.compile)}')
+    print(f'MIXER={args.mixer}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -471,11 +475,14 @@ def eval_cmd(args: argparse.Namespace) -> None:
     """Evaluate a checkpoint on HF test (or train-head holdout)."""
     device = _resolve_device()
     ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    ckpt_args = ckpt.get('args') or {}
+    mixer = getattr(args, 'mixer', None) or ckpt_args.get('mixer', 'euclid_axial')
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
+        mixer=mixer,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -548,6 +555,13 @@ def main() -> None:
         help='Average blank NLL over ODE steps (default: final state only)',
     )
     t.add_argument(
+        '--mixer',
+        type=str,
+        default='euclid_axial',
+        choices=['euclid_axial', 'cross_coupled'],
+        help='velocity mixer: euclid_axial (default T³+MHA) or cross_coupled (live T² MLP)',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -576,6 +590,13 @@ def main() -> None:
     e.add_argument('--n-heads', type=int, default=4)
     e.add_argument('--num-steps', type=int, default=8)
     e.add_argument('--dt', type=float, default=0.5)
+    e.add_argument(
+        '--mixer',
+        type=str,
+        default=None,
+        choices=['euclid_axial', 'cross_coupled'],
+        help='override mixer; default reads ckpt args',
+    )
 
     args = parser.parse_args()
     if args.command == 'train':

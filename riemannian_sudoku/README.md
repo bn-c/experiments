@@ -1,8 +1,10 @@
 # Riemannian Sudoku
 
 Peer spike: Sudoku solver on the positive orthant of \(S^8\) (\(p = s^2\)) with
-factorized row/col/box axial attention, fixed Clifford \(T^3\) positional encoding,
-and an Exp-map + abs-renorm retraction.
+an Exp-map + abs-renorm retraction. Default mixer `--mixer euclid_axial` uses
+factorized row/col/box axial attention and fixed Clifford \(T^3\) PE.
+`--mixer cross_coupled` replaces that with a live \(T^2\) (row×col) gauge and a
+shared ambient MLP → per-manifold tangent project → parallel Exp.
 
 Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache).
 
