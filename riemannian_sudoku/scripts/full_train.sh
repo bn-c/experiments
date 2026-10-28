@@ -4,9 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
 
-LR="${LR:-1e-4}"
+# Phase B pass: batch 128 + √LR vs batch-64 baseline; compile mode=default.
+LR="${LR:-1.414213562e-4}"
 NUM_STEPS="${NUM_STEPS:-8}"
-BATCH="${BATCH:-64}"
+BATCH="${BATCH:-128}"
 STEPS="${STEPS:-50000}"
 TRAIN_SIZE="${TRAIN_SIZE:-100000}"
 VAL_SIZE="${VAL_SIZE:-2048}"
@@ -20,6 +21,9 @@ KINETIC_WEIGHT="${KINETIC_WEIGHT:-0.05}"
 CONSTRAINT_WEIGHT="${CONSTRAINT_WEIGHT:-0.0}"
 NO_AUGMENT="${NO_AUGMENT:-0}"
 SUPERVISE_ALL_STEPS="${SUPERVISE_ALL_STEPS:-1}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+# GPU fidelity: mode=default compile ~1.2× steady (Phase A pass); reduce-overhead unsafe.
+COMPILE="${COMPILE:-1}"
 NAME="${WANDB_NAME:-full-stable-lr${LR}-ns${NUM_STEPS}-b${BATCH}-s${STEPS}}"
 
 mkdir -p "$CKPT_DIR" logs
@@ -34,6 +38,7 @@ ARGS=(
   --early-stop-patience "$EARLY_STOP_PATIENCE"
   --kinetic-weight "$KINETIC_WEIGHT"
   --constraint-weight "$CONSTRAINT_WEIGHT"
+  --num-workers "$NUM_WORKERS" --pin-memory
   --eval-every 500 --log-every 50
   --ckpt-every 1000 --ckpt-dir "$CKPT_DIR"
   --wandb-name "$NAME"
@@ -47,6 +52,9 @@ if [[ "$NO_AUGMENT" == "1" ]]; then
 fi
 if [[ "$SUPERVISE_ALL_STEPS" == "1" ]]; then
   ARGS+=(--supervise-all-steps)
+fi
+if [[ "$COMPILE" == "1" ]]; then
+  ARGS+=(--compile)
 fi
 
 echo "=== $NAME ==="

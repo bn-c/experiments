@@ -6,6 +6,7 @@ import argparse
 import logging
 import math
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -73,9 +74,9 @@ def evaluate(model: RiemannianSudokuSolver, loader: DataLoader, device: torch.de
     box_sum = 0.0
     n = 0
     for batch in loader:
-        puzzle = batch['puzzle'].to(device)
-        solution = batch['solution'].to(device)
-        mask = batch['mask'].to(device)
+        puzzle = batch['puzzle'].to(device, non_blocking=True)
+        solution = batch['solution'].to(device, non_blocking=True)
+        mask = batch['mask'].to(device, non_blocking=True)
         out = model(puzzle)
         b_acc, e_acc = _blank_and_exact(out['pred'], solution, mask)
         units = unit_group_accuracies(out['pred'], solution)
@@ -149,18 +150,29 @@ def train_cmd(args: argparse.Namespace) -> None:
     train_df, val_df = split_train_val(df, val_size=args.val_size, seed=args.seed)
     logger.info('Train=%d Val=%d', len(train_df), len(val_df))
 
+    use_cuda = device.type == 'cuda'
+    pin = bool(args.pin_memory and use_cuda)
+    nw = int(args.num_workers)
+    loader_kw: dict = {
+        'num_workers': nw,
+        'pin_memory': pin,
+        'persistent_workers': nw > 0,
+    }
+    if nw > 0:
+        loader_kw['prefetch_factor'] = max(2, int(args.prefetch_factor))
     train_loader = DataLoader(
         SudokuTorchDataset(train_df, augment=not args.no_augment, seed=args.seed),
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        **loader_kw,
     )
     val_loader = DataLoader(
         SudokuTorchDataset(val_df, augment=False),
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,
+        **loader_kw,
     )
+    logger.info('DataLoader workers=%d pin_memory=%s', nw, pin)
 
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
@@ -171,6 +183,11 @@ def train_cmd(args: argparse.Namespace) -> None:
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
     ).to(device)
+    if args.compile:
+        # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
+        # Same hot-path wrap idea as sfprm_miniarc/train.py --compile.
+        model.forward = torch.compile(model.forward, mode='default')  # type: ignore[method-assign]
+        logger.info('torch.compile: model.forward (mode=default)')
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{n_params:,}')
 
@@ -249,6 +266,14 @@ def train_cmd(args: argparse.Namespace) -> None:
     model.train()
     train_iter = iter(train_loader)
     pbar = tqdm(total=args.steps, initial=step, desc='train')
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize()
+    t_wall0 = time.perf_counter()
+    # Discard compile/cudagraph capture from steady-state it/s (first N steps).
+    warmup_steps = int(args.throughput_warmup)
+    t_steady0: float | None = None
+    steady_start_step = 0
     while step < args.steps:
         try:
             batch = next(train_iter)
@@ -256,9 +281,10 @@ def train_cmd(args: argparse.Namespace) -> None:
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        puzzle = batch['puzzle'].to(device)
-        solution = batch['solution'].to(device)
-        mask = batch['mask'].to(device)
+        nb = pin
+        puzzle = batch['puzzle'].to(device, non_blocking=nb)
+        solution = batch['solution'].to(device, non_blocking=nb)
+        mask = batch['mask'].to(device, non_blocking=nb)
         out = model(puzzle, solution, mask)
         opt.zero_grad(set_to_none=True)
         out['loss'].backward()
@@ -268,6 +294,11 @@ def train_cmd(args: argparse.Namespace) -> None:
         if sched is not None:
             sched.step()
         step += 1
+        if t_steady0 is None and step >= warmup_steps:
+            if use_cuda:
+                torch.cuda.synchronize()
+            t_steady0 = time.perf_counter()
+            steady_start_step = step
 
         blank_acc, exact = _blank_and_exact(out['pred'].detach(), solution, mask)
         units = unit_group_accuracies(out['pred'].detach(), solution)
@@ -355,6 +386,32 @@ def train_cmd(args: argparse.Namespace) -> None:
             logger.info('Saved last %s at step %d', last_path, step)
 
     pbar.close()
+    if use_cuda:
+        torch.cuda.synchronize()
+    wall_s = time.perf_counter() - t_wall0
+    steps_done = max(step, 1)
+    it_s = steps_done / wall_s if wall_s > 0 else 0.0
+    steady_steps = max(step - steady_start_step, 0)
+    if t_steady0 is not None and steady_steps > 0:
+        steady_s = time.perf_counter() - t_steady0
+        it_s_steady = steady_steps / steady_s if steady_s > 0 else 0.0
+    else:
+        steady_s = 0.0
+        it_s_steady = it_s
+    max_vram_gb = (
+        torch.cuda.max_memory_allocated(device) / (1024**3) if use_cuda else 0.0
+    )
+    logger.info(
+        'Throughput: %.2f it/s overall (%d steps, %.1fs); steady %.2f it/s after warmup=%d (%d steps, %.1fs); max_vram=%.2f GiB',
+        it_s,
+        steps_done,
+        wall_s,
+        it_s_steady,
+        warmup_steps,
+        steady_steps,
+        steady_s,
+        max_vram_gb,
+    )
 
     _save_ckpt(last_path, model, opt, step, n_params, best_blank, args)
     logger.info('Saved %s', last_path)
@@ -401,6 +458,11 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'VAL_BOX={final_val["box_acc"]:.6f}')
     print(f'VAL_EXACT={final_val["exact_board"]:.6f}')
     print(f'BEST_BLANK={best_blank:.6f}')
+    print(f'IT_S={it_s:.4f}')
+    print(f'IT_S_STEADY={it_s_steady:.4f}')
+    print(f'WALL_S={wall_s:.2f}')
+    print(f'MAX_VRAM_GB={max_vram_gb:.3f}')
+    print(f'COMPILE={int(args.compile)}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -484,6 +546,25 @@ def main() -> None:
         '--supervise-all-steps',
         action='store_true',
         help='Average blank NLL over ODE steps (default: final state only)',
+    )
+    t.add_argument(
+        '--compile',
+        action='store_true',
+        help='wrap model.forward with torch.compile(mode=default); default off',
+    )
+    t.add_argument('--num-workers', type=int, default=4, help='DataLoader workers (0=main process)')
+    t.add_argument(
+        '--pin-memory',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='pin_memory for CUDA H2D (default on; --no-pin-memory to disable)',
+    )
+    t.add_argument('--prefetch-factor', type=int, default=2, help='DataLoader prefetch_factor when workers>0')
+    t.add_argument(
+        '--throughput-warmup',
+        type=int,
+        default=100,
+        help='Steps excluded from IT_S_STEADY (compile capture / dataloader fill)',
     )
 
     e = sub.add_parser('eval', help='Evaluate checkpoint')
