@@ -70,6 +70,7 @@ class RiemannianSudokuSolver(nn.Module):
         dt: float = 0.5,
         kinetic_weight: float = 0.05,
         constraint_weight: float = 0.1,
+        supervise_all_steps: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -77,6 +78,7 @@ class RiemannianSudokuSolver(nn.Module):
         self.dt = dt
         self.kinetic_weight = kinetic_weight
         self.constraint_weight = constraint_weight
+        self.supervise_all_steps = supervise_all_steps
 
         self.proj = nn.Linear(9 + 6, d_model)
         self.axial = SudokuAxialAttention(d_model, n_heads)
@@ -94,14 +96,16 @@ class RiemannianSudokuSolver(nn.Module):
         h = self.axial(h)
         return self.velocity(h)
 
-    def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor]]:
+    def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """
         Run ``num_steps`` of dynamics.
 
-        Returns final ``s`` and per-step tangent velocities (after clue mask).
+        Returns final ``s``, per-step tangent velocities (after clue mask), and
+        post-step states (for optional multi-step task supervision).
         """
         s, blank_mask = init_sphere_state(puzzle)
         velocities: list[Tensor] = []
+        states: list[Tensor] = []
         for _ in range(self.num_steps):
             v = self._velocity_at(s)
             v = project_tangent(s, v)
@@ -116,7 +120,17 @@ class RiemannianSudokuSolver(nn.Module):
                 s_clue.scatter_(1, digit_idx.unsqueeze(1), 1.0)
                 s = s.clone()
                 s[clues] = s_clue
-        return s, velocities
+            states.append(s)
+        return s, velocities, states
+
+    @staticmethod
+    def _blank_nll(probs: Tensor, solution: Tensor, mask: Tensor) -> Tensor:
+        """Mean blank-cell NLL on ``p = s²`` (clues excluded via mask)."""
+        log_p = probs.clamp_min(1e-8).log()
+        gather_idx = (solution - 1).clamp(0, 8).unsqueeze(-1)
+        nll_cell = -log_p.gather(-1, gather_idx).squeeze(-1)
+        blank_denom = mask.sum().clamp_min(1.0)
+        return (nll_cell * mask).sum() / blank_denom
 
     def forward(
         self,
@@ -132,7 +146,7 @@ class RiemannianSudokuSolver(nn.Module):
             solution: ``(B, 81)`` digits 1-9 (required for loss).
             mask: ``(B, 81)`` blank mask; defaults to ``puzzle == 0``.
         """
-        s, velocities = self.integrate(puzzle)
+        s, velocities, states = self.integrate(puzzle)
         probs = s.square()
         pred = probs.argmax(dim=-1) + 1  # digits 1-9
 
@@ -148,12 +162,11 @@ class RiemannianSudokuSolver(nn.Module):
         if mask is None:
             mask = (puzzle == 0).float()
 
-        # Blank-cell NLL on p = s².
-        log_p = probs.clamp_min(1e-8).log()
-        gather_idx = (solution - 1).clamp(0, 8).unsqueeze(-1)
-        nll_cell = -log_p.gather(-1, gather_idx).squeeze(-1)
-        blank_denom = mask.sum().clamp_min(1.0)
-        task_loss = (nll_cell * mask).sum() / blank_denom
+        # Blank-cell NLL: final state only, or mean over ODE steps.
+        if self.supervise_all_steps:
+            task_loss = torch.stack([self._blank_nll(st.square(), solution, mask) for st in states]).mean()
+        else:
+            task_loss = self._blank_nll(probs, solution, mask)
 
         kinetic = velocities[-1].square().mean()
         constraint = unit_sum_penalty(probs, self.group_indices)

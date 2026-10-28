@@ -32,7 +32,7 @@ def test_integrate_clues_frozen_and_orthant() -> None:
     # Ensure some clues.
     puzzle[:, 0] = 3
     puzzle[:, 1] = 0
-    s, _ = model.integrate(puzzle)
+    s, _, _ = model.integrate(puzzle)
     assert (s >= 0).all()
     assert torch.allclose(s.norm(dim=-1), torch.ones(2, 81), atol=1e-4)
     # Clue cell 0 stays at e_2
@@ -52,6 +52,30 @@ def test_loss_backward() -> None:
     out['loss'].backward()
     grads = [p.grad.abs().sum().item() for p in model.parameters() if p.grad is not None]
     assert sum(grads) > 0.0
+
+
+def test_supervise_all_steps_averages_blank_nll() -> None:
+    torch.manual_seed(0)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    final = RiemannianSudokuSolver(d_model=32, n_heads=4, num_steps=3, kinetic_weight=0.0, constraint_weight=0.0)
+    multi = RiemannianSudokuSolver(
+        d_model=32,
+        n_heads=4,
+        num_steps=3,
+        kinetic_weight=0.0,
+        constraint_weight=0.0,
+        supervise_all_steps=True,
+    )
+    multi.load_state_dict(final.state_dict())
+    out_f = final(puzzle, solution, mask)
+    out_m = multi(puzzle, solution, mask)
+    assert torch.isfinite(out_m['loss'])
+    # Multi-step mean ≠ final-only for a random untrained net (almost surely).
+    assert not torch.allclose(out_f['task_loss'], out_m['task_loss'], atol=1e-6)
+    out_m['loss'].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in multi.parameters())
 
 
 def test_buffers_follow_device() -> None:

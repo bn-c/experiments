@@ -124,6 +124,10 @@ def _save_ckpt(
                 'train_size': args.train_size,
                 'val_size': args.val_size,
                 'seed': args.seed,
+                'kinetic_weight': args.kinetic_weight,
+                'constraint_weight': args.constraint_weight,
+                'supervise_all_steps': args.supervise_all_steps,
+                'no_augment': args.no_augment,
             },
         },
         path,
@@ -163,6 +167,9 @@ def train_cmd(args: argparse.Namespace) -> None:
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
+        kinetic_weight=args.kinetic_weight,
+        constraint_weight=args.constraint_weight,
+        supervise_all_steps=args.supervise_all_steps,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{n_params:,}')
@@ -225,6 +232,10 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'grad_clip': args.grad_clip,
                 'early_stop_drop': args.early_stop_drop,
                 'early_stop_patience': args.early_stop_patience,
+                'kinetic_weight': args.kinetic_weight,
+                'constraint_weight': args.constraint_weight,
+                'supervise_all_steps': args.supervise_all_steps,
+                'no_augment': args.no_augment,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -467,6 +478,13 @@ def main() -> None:
     t.add_argument('--wandb-name', type=str, default='', help='Optional W&B run name')
     t.add_argument('--no-wandb', action='store_true')
     t.add_argument('--no-augment', action='store_true')
+    t.add_argument('--kinetic-weight', type=float, default=0.05, help='λ_k on final-step velocity energy')
+    t.add_argument('--constraint-weight', type=float, default=0.1, help='λ_c on unit-sum MSE')
+    t.add_argument(
+        '--supervise-all-steps',
+        action='store_true',
+        help='Average blank NLL over ODE steps (default: final state only)',
+    )
 
     e = sub.add_parser('eval', help='Evaluate checkpoint')
     e.add_argument('--checkpoint', type=str, required=True)

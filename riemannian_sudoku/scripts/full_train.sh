@@ -16,6 +16,10 @@ LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 EARLY_STOP_DROP="${EARLY_STOP_DROP:-0.15}"
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-2}"
+KINETIC_WEIGHT="${KINETIC_WEIGHT:-0.05}"
+CONSTRAINT_WEIGHT="${CONSTRAINT_WEIGHT:-0.1}"
+NO_AUGMENT="${NO_AUGMENT:-0}"
+SUPERVISE_ALL_STEPS="${SUPERVISE_ALL_STEPS:-0}"
 NAME="${WANDB_NAME:-full-stable-lr${LR}-ns${NUM_STEPS}-b${BATCH}-s${STEPS}}"
 
 mkdir -p "$CKPT_DIR" logs
@@ -28,6 +32,8 @@ ARGS=(
   --grad-clip "$GRAD_CLIP"
   --early-stop-drop "$EARLY_STOP_DROP"
   --early-stop-patience "$EARLY_STOP_PATIENCE"
+  --kinetic-weight "$KINETIC_WEIGHT"
+  --constraint-weight "$CONSTRAINT_WEIGHT"
   --eval-every 500 --log-every 50
   --ckpt-every 1000 --ckpt-dir "$CKPT_DIR"
   --wandb-name "$NAME"
@@ -35,6 +41,12 @@ ARGS=(
 )
 if [[ -n "$RESUME" ]]; then
   ARGS+=(--resume "$RESUME")
+fi
+if [[ "$NO_AUGMENT" == "1" ]]; then
+  ARGS+=(--no-augment)
+fi
+if [[ "$SUPERVISE_ALL_STEPS" == "1" ]]; then
+  ARGS+=(--supervise-all-steps)
 fi
 
 echo "=== $NAME ==="
