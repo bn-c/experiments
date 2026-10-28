@@ -12,12 +12,13 @@ uv sync
 uv run pytest
 # smoke
 uv run riemannian-sudoku train --train-size 1024 --val-size 128 --steps 200 --batch-size 32
-# full desk (after tune): last.pt every 1000 steps, best.pt by val blank
-uv run riemannian-sudoku train \
-  --train-size 100000 --val-size 2048 --steps 50000 --batch-size 64 \
-  --lr 3e-4 --num-steps 8 --eval-every 500 --log-every 50 --ckpt-every 1000
+# desk tune (LR × num_steps × batch); then full with locked hparams
+bash scripts/desk_tune.sh logs/desk-tune-clean.tsv
+# locked after clean sweep: lr=1e-4, num_steps=8, batch=64
+bash scripts/full_train.sh   # or: LR=1e-4 NUM_STEPS=8 BATCH=64 STEPS=50000 ...
 # resume
-uv run riemannian-sudoku train --resume checkpoints/last.pt --steps 50000 ...
+uv run riemannian-sudoku train --resume checkpoints/full/last.pt --steps 50000 ...
 ```
 
 W&B project: `riemannian-sudoku`. Logs blank / exact-board / row / col / box on train+val.
+Desk full-train report lives in the agent-store docs (`riemannian-sudoku-full-train.md`).
