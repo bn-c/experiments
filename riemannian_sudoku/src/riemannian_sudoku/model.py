@@ -45,12 +45,11 @@ def init_sphere_state(puzzle: Tensor) -> tuple[Tensor, Tensor]:
     s = torch.full((b, 81, 9), 1.0 / 3.0, device=device, dtype=torch.float32)
     blank = puzzle == 0
     clues = ~blank
-    if clues.any():
-        digit_idx = (puzzle[clues] - 1).clamp(0, 8)
-        s_clue = torch.zeros(int(clues.sum().item()), 9, device=device, dtype=torch.float32)
-        s_clue.scatter_(1, digit_idx.unsqueeze(1), 1.0)
-        s = s.clone()
-        s[clues] = s_clue
+    # Vectorized clue one-hot (no .item() / data-dependent shapes — Inductor-friendly).
+    digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
+    onehot = torch.zeros(b, 81, 9, device=device, dtype=torch.float32)
+    onehot.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
+    s = torch.where(clues.unsqueeze(-1), onehot, s)
     return s, blank.float()
 
 
@@ -112,14 +111,12 @@ class RiemannianSudokuSolver(nn.Module):
             v = v * blank_mask.unsqueeze(-1)
             velocities.append(v)
             s = riemannian_exp_map_orthant(s, v, dt=self.dt)
-            # Re-clamp clues exactly (numerical drift guard).
+            # Re-clamp clues exactly (numerical drift guard; vectorized for compile).
             clues = blank_mask == 0
-            if clues.any():
-                digit_idx = (puzzle[clues] - 1).clamp(0, 8)
-                s_clue = torch.zeros(int(clues.sum().item()), 9, device=s.device, dtype=s.dtype)
-                s_clue.scatter_(1, digit_idx.unsqueeze(1), 1.0)
-                s = s.clone()
-                s[clues] = s_clue
+            digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
+            s_clue = torch.zeros_like(s)
+            s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
+            s = torch.where(clues.unsqueeze(-1), s_clue, s)
             states.append(s)
         return s, velocities, states
 

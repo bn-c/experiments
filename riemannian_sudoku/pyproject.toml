@@ -20,8 +20,9 @@ dev = [
 ]
 
 [project.optional-dependencies]
+# Desk AMD: match repo root ROCm 7.1 nightlies (Inductor/Triton need HIP≥7).
 rocm = [
-    "pytorch-triton-rocm",
+    "triton-rocm",
 ]
 
 [build-system]
@@ -36,14 +37,14 @@ riemannian-sudoku = "riemannian_sudoku.train:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-rocm-nightly" }
-pytorch-triton-rocm = { index = "pytorch-rocm-nightly" }
+triton-rocm = { index = "pytorch-rocm-nightly" }
 
 [tool.uv]
 prerelease = "allow"
 
 [[tool.uv.index]]
 name = "pytorch-rocm-nightly"
-url = "https://download.pytorch.org/whl/nightly/rocm6.4"
+url = "https://download.pytorch.org/whl/nightly/rocm7.1"
 explicit = true
 
 [tool.ruff]
