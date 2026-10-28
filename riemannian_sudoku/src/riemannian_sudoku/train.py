@@ -197,9 +197,12 @@ def train_cmd(args: argparse.Namespace) -> None:
 
     sched = None
     if args.lr_schedule == 'cosine':
-        # Cosine over remaining steps from current `step`.
+        # Cosine over remaining steps from current `step`; floor at 10% of peak LR.
         remaining = max(args.steps - step, 1)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=remaining, eta_min=args.lr * 0.01)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=remaining, eta_min=args.lr * 0.1)
+
+    early_bad = 0
+    early_stopped = False
 
     wandb_run = None
     if not args.no_wandb:
@@ -219,6 +222,9 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'batch_size': args.batch_size,
                 'lr': args.lr,
                 'lr_schedule': args.lr_schedule,
+                'grad_clip': args.grad_clip,
+                'early_stop_drop': args.early_stop_drop,
+                'early_stop_patience': args.early_stop_patience,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -245,6 +251,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         out = model(puzzle, solution, mask)
         opt.zero_grad(set_to_none=True)
         out['loss'].backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
         opt.step()
         if sched is not None:
             sched.step()
@@ -304,8 +312,31 @@ def train_cmd(args: argparse.Namespace) -> None:
             if is_best:
                 best_blank = val['blank_acc']
                 best_exact = val['exact_board']
+                early_bad = 0
                 _save_ckpt(best_path, model, opt, step, n_params, best_blank, args)
                 logger.info('Saved best %s (blank=%.4f)', best_path, best_blank)
+            elif (
+                args.early_stop_drop > 0
+                and args.early_stop_patience > 0
+                and best_blank >= 0
+                and (best_blank - val['blank_acc']) >= args.early_stop_drop
+            ):
+                early_bad += 1
+                logger.info(
+                    'Early-stop warn %d/%d: blank=%.4f is >=%.3f below best=%.4f',
+                    early_bad,
+                    args.early_stop_patience,
+                    val['blank_acc'],
+                    args.early_stop_drop,
+                    best_blank,
+                )
+                if early_bad >= args.early_stop_patience:
+                    early_stopped = True
+                    logger.info('Early-stop at step %d; keeping best.pt (blank=%.4f)', step, best_blank)
+                    model.train()
+                    break
+            else:
+                early_bad = 0
             model.train()
 
         if args.ckpt_every > 0 and step % args.ckpt_every == 0:
@@ -317,14 +348,20 @@ def train_cmd(args: argparse.Namespace) -> None:
     _save_ckpt(last_path, model, opt, step, n_params, best_blank, args)
     logger.info('Saved %s', last_path)
 
+    # Headline final metrics from best.pt when available (esp. after early-stop).
+    if best_path.is_file() and best_blank >= 0:
+        ckpt = torch.load(best_path, map_location='cpu', weights_only=False)
+        model.load_state_dict(ckpt['model'])
+        logger.info('Loaded best.pt for final eval (blank=%.4f @ step %s)', best_blank, ckpt.get('step'))
     final_val = evaluate(model, val_loader, device)
     logger.info(
-        'Final val blank=%.4f row=%.4f col=%.4f box=%.4f exact=%.4f',
+        'Final val blank=%.4f row=%.4f col=%.4f box=%.4f exact=%.4f%s',
         final_val['blank_acc'],
         final_val['row_acc'],
         final_val['col_acc'],
         final_val['box_acc'],
         final_val['exact_board'],
+        ' (early-stop)' if early_stopped else '',
     )
     run_id = None
     if wandb_run is not None:
@@ -336,6 +373,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'val/col_acc': final_val['col_acc'],
                 'val/box_acc': final_val['box_acc'],
                 'val/best_blank': best_blank,
+                'train/early_stopped': int(early_stopped),
             },
             step=step,
         )
@@ -352,6 +390,8 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'VAL_BOX={final_val["box_acc"]:.6f}')
     print(f'VAL_EXACT={final_val["exact_board"]:.6f}')
     print(f'BEST_BLANK={best_blank:.6f}')
+    print(f'EARLY_STOPPED={int(early_stopped)}')
+    print(f'STOP_STEP={step}')
 
 
 def eval_cmd(args: argparse.Namespace) -> None:
@@ -403,6 +443,19 @@ def main() -> None:
     t.add_argument('--batch-size', type=int, default=32)
     t.add_argument('--lr', type=float, default=3e-4)
     t.add_argument('--lr-schedule', type=str, default='constant', choices=['constant', 'cosine'])
+    t.add_argument('--grad-clip', type=float, default=1.0, help='clip_grad_norm_ max_norm; 0 disables')
+    t.add_argument(
+        '--early-stop-drop',
+        type=float,
+        default=0.0,
+        help='Stop if val blank is this far below best for --early-stop-patience evals (0=off)',
+    )
+    t.add_argument(
+        '--early-stop-patience',
+        type=int,
+        default=0,
+        help='Consecutive cliff evals before early-stop (0=off)',
+    )
     t.add_argument('--steps', type=int, default=200)
     t.add_argument('--seed', type=int, default=42)
     t.add_argument('--log-every', type=int, default=10)
