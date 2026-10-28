@@ -4,9 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
 
-LR="${LR:-1e-4}"
+# Phase B pass: batch 128 + √LR vs batch-64 baseline; compile mode=default.
+LR="${LR:-1.414213562e-4}"
 NUM_STEPS="${NUM_STEPS:-8}"
-BATCH="${BATCH:-64}"
+BATCH="${BATCH:-128}"
 STEPS="${STEPS:-50000}"
 TRAIN_SIZE="${TRAIN_SIZE:-100000}"
 VAL_SIZE="${VAL_SIZE:-2048}"
