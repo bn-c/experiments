@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import torch
+from torch import nn
 
 from riemannian_sudoku.geometry import project_tangent
 from riemannian_sudoku.model import (
@@ -12,6 +14,7 @@ from riemannian_sudoku.model import (
     init_sphere_state,
     init_t2_gauge,
 )
+from riemannian_sudoku.train import _resolve_mixer
 
 
 def _cc_model(**kw) -> RiemannianSudokuSolver:
@@ -98,6 +101,35 @@ def test_euclid_axial_still_default() -> None:
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # Tiny d_model; just ensure axial path builds.
     assert n > 0
+
+
+def test_cross_coupled_param_count_and_mlp_shape() -> None:
+    model = RiemannianSudokuSolver(mixer='cross_coupled')
+    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert n == 1_047_293, f'unexpected param count {n}'
+    assert model.cross_mlp is not None
+    linears = [m for m in model.cross_mlp if isinstance(m, nn.Linear)]
+    shapes = [(m.in_features, m.out_features) for m in linears]
+    assert shapes == [(765, 512), (512, 512), (512, 765)]
+
+
+def test_resolve_mixer_ckpt_cli_roundtrip(tmp_path: Path) -> None:
+    """Train/eval resume: ckpt mixer wins when CLI omits --mixer; CLI overrides."""
+    assert _resolve_mixer(None) == 'euclid_axial'
+    assert _resolve_mixer(None, {}) == 'euclid_axial'
+    assert _resolve_mixer(None, {'mixer': 'cross_coupled'}) == 'cross_coupled'
+    assert _resolve_mixer('euclid_axial', {'mixer': 'cross_coupled'}) == 'euclid_axial'
+    assert _resolve_mixer('cross_coupled', {'mixer': 'euclid_axial'}) == 'cross_coupled'
+
+    # Smoke: build from ckpt-resolved mixer and load_state_dict (the resume path).
+    src = RiemannianSudokuSolver(mixer='cross_coupled', num_steps=2)
+    ckpt_path = tmp_path / 'cc.pt'
+    torch.save({'model': src.state_dict(), 'args': {'mixer': 'cross_coupled'}}, ckpt_path)
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    mixer = _resolve_mixer(None, ckpt.get('args') or {})
+    dst = RiemannianSudokuSolver(mixer=mixer, num_steps=2)
+    dst.load_state_dict(ckpt['model'])  # must not raise Missing/Unexpected key
+    assert dst.mixer == 'cross_coupled'
 
 
 def test_unknown_mixer_raises() -> None:

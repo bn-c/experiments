@@ -260,6 +260,8 @@ class RiemannianSudokuSolver(nn.Module):
         else:
             task_loss = self._blank_nll(probs, solution, mask)
 
+        # Kinetic on cell velocities only; gauge v_g is intentionally unregularized
+        # (loss recipe unchanged vs euclid_axial — do not "fix" by accident).
         kinetic = velocities[-1].square().mean()
         constraint = unit_sum_penalty(probs, self.group_indices)
         loss = task_loss + self.kinetic_weight * kinetic + self.constraint_weight * constraint

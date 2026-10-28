@@ -8,6 +8,7 @@ export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
 LR="${LR:-1.414213562e-4}"
 NUM_STEPS="${NUM_STEPS:-8}"
 BATCH="${BATCH:-128}"
+# Default 2000 for a quick desk pass; published A/B table used STEPS=5000.
 STEPS="${STEPS:-2000}"
 TRAIN_SIZE="${TRAIN_SIZE:-100000}"
 VAL_SIZE="${VAL_SIZE:-2048}"
