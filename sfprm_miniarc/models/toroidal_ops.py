@@ -1,9 +1,10 @@
 """Product-of-circles torus geometry in R^d (d even).
 
-Latents are d/2 interleaved (cos, sin) pairs. Projection renorms each pair to
-the unit circle. Geodesic interp is per-pair 2D guarded Slerp. Halt residual is
-mean-over-pairs chordal then max over tokens so r ∈ [0, 2] (same scale as
-sphere chordal → keep τ=0.01 without retuning).
+Latents are d/2 interleaved pairs. ``project_to_torus`` renorms each pair to
+equal radius ``1/√n_pairs`` so ambient ‖z‖₂≈1 (sphere-matched), while directions
+live on (S^1)^{d/2}. Geodesic interp is per-pair 2D guarded Slerp on unit
+directions then re-scaled. Halt residual is mean-over-pairs direction chordal
+then max over tokens so r ∈ [0, 2] (same τ=0.01 as sphere).
 
 Not paper-faithful SFPRM — torus A/B experiment only.
 """
@@ -22,15 +23,25 @@ def _as_pairs(x: torch.Tensor) -> torch.Tensor:
     return x.reshape(*x.shape[:-1], d // 2, 2)
 
 
+def _pair_radius(n_pairs: int) -> float:
+    """Equal per-pair radius so ambient ‖z‖₂ = 1 when all pairs are live."""
+    return float(n_pairs) ** -0.5
+
+
 def project_to_torus(x: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-    """Per-pair L2 renorm onto (S^1)^{d/2} (interleaved pairs on last dim)."""
+    """Per-pair direction renorm with radius ``1/√n_pairs`` (unit ambient).
+
+    Interleaved pairs on last dim. Weight rows / latents / Q/K all share this
+    retract so ‖W_row‖₂≈1 and ‖z‖₂≈1 like the sphere nGPT path.
+    """
     pairs = _as_pairs(x)
+    n_pairs = pairs.shape[-2]
     norms = pairs.norm(dim=-1, keepdim=True).clamp_min(eps)
-    return (pairs / norms).reshape(x.shape)
+    return (pairs / norms * _pair_radius(n_pairs)).reshape(x.shape)
 
 
 def nlerp(u: torch.Tensor, v: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
-    """Normalized lerp, then retract to the product torus."""
+    """Normalized lerp, then retract to the product torus (unit ambient)."""
     if not torch.is_tensor(eta):
         eta = torch.as_tensor(eta, device=u.device, dtype=u.dtype)
     while eta.ndim < u.ndim:
@@ -47,9 +58,7 @@ def _perp_unit_2d(u: torch.Tensor, v: torch.Tensor, eps: float = 1e-6) -> torch.
     the continuous perp so the short arc from u toward v is preserved when defined.
     """
     del eps
-    # Analytic ⊥: J u = (-u_y, u_x). Flip if ⟨Ju, v⟩ < 0 so arc heads toward v.
     e = torch.stack((-u[..., 1], u[..., 0]), dim=-1)
-    # When v≈-u, ⟨e,v⟩≈0 — keep +e (deterministic); mid-arc is still ±e ⊥ u.
     flip = (e * v).sum(dim=-1, keepdim=True) < 0
     return torch.where(flip, -e, e)
 
@@ -63,7 +72,7 @@ def torus_interp(
     eps: float = 1e-7,
 ) -> torch.Tensor:
     """
-    Per-pair guarded circular interpolation (2D Slerp on each circle).
+    Per-pair guarded circular interpolation on unit directions, then unit-ambient scale.
 
     Same branch structure as sphere guarded Slerp, applied independently per pair.
     """
@@ -75,7 +84,12 @@ def torus_interp(
 
     up = _as_pairs(u)
     vp = _as_pairs(v)
-    # Broadcast eta onto pair axis: [..., n_pairs, 1]
+    n_pairs = up.shape[-2]
+    radius = _pair_radius(n_pairs)
+    # Slerp on unit circles (ambient radius factored out).
+    up = up / up.norm(dim=-1, keepdim=True).clamp_min(eps)
+    vp = vp / vp.norm(dim=-1, keepdim=True).clamp_min(eps)
+
     eta_p = eta_b.unsqueeze(-1)
     while eta_p.ndim < up.ndim:
         eta_p = eta_p.unsqueeze(-1)
@@ -89,7 +103,7 @@ def torus_interp(
     ) * vp
     slerp = slerp / slerp.norm(dim=-1, keepdim=True).clamp_min(eps)
 
-    near = ((1.0 - eta_p) * up + eta_p * vp)
+    near = (1.0 - eta_p) * up + eta_p * vp
     near = near / near.norm(dim=-1, keepdim=True).clamp_min(eps)
 
     e = _perp_unit_2d(up, vp, eps=eps)
@@ -99,7 +113,7 @@ def torus_interp(
 
     out = torch.where(c > 1.0 - eps_omega, near, slerp)
     out = torch.where(c < -1.0 + eps_omega, arc, out)
-    return out.reshape(u.shape)
+    return (out * radius).reshape(u.shape)
 
 
 # Aliases matching sphere call-site names (torus fork only).
@@ -114,12 +128,16 @@ def torus_residual(
     token_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Mean-over-pairs chordal residual, then max over tokens → [B], r ∈ [0, 2].
+    Mean-over-pairs direction chordal residual, then max over tokens → [B], r ∈ [0, 2].
 
-    r = max_t (2/d) Σ_i (1 − ⟨u_{t,i}, ũ_{t,i}⟩) = max_t mean_i (1 − cos θ_{t,i}).
+    Uses unit-pair directions so ambient radius does not change the τ scale:
+    r = max_t mean_i (1 − cos θ_{t,i}).
     """
     zp = _as_pairs(z)
     ztp = _as_pairs(z_tilde)
+    eps = 1e-7
+    zp = zp / zp.norm(dim=-1, keepdim=True).clamp_min(eps)
+    ztp = ztp / ztp.norm(dim=-1, keepdim=True).clamp_min(eps)
     cos = (zp * ztp).sum(dim=-1).clamp(-1.0, 1.0)  # [B, T, n_pairs]
     per_tok = (1.0 - cos).mean(dim=-1)  # [B, T] ∈ [0, 2]
     if token_mask is None:

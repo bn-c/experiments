@@ -3,8 +3,9 @@
 Parallel copy of sfprm_core with product-of-circles geometry from toroidal_ops.
 Sphere baseline (sfprm_core / spherical_ops) is untouched. Not paper-faithful.
 
-Q/K attention: interleaved torus project → RoPE → re-project (RoPE half-split
-leaves interleaved pairs) → scale by 1/√(d/2) for unit ambient (sphere logit scale).
+``project_to_torus`` bakes unit ambient (pair radius 1/√n_pairs) for latents,
+weights, and Q/K. Attention: project → RoPE → re-project over full ambient
+(interleaved pairs; RoPE half-split leaves the torus) — no extra Q/K scale.
 
 Desk default dims match sphere: d_model=384, n_heads=8, d_ff=1536, n_layers=2.
 """
@@ -171,17 +172,12 @@ class NGPTLayer(nn.Module):
         cos = cos.to(dtype=q.dtype, device=q.device)
         sin = sin.to(dtype=q.dtype, device=q.device)
         q, k = apply_rope(q, k, cos, sin)
-        # Choice (documented): keep interleaved product-torus pairs for the latent
-        # manifold; RoPE uses half-split (i, i+Dh/2) so it leaves that torus.
-        # Retract Q/K onto interleaved pairs before attention (not RoPE-aligned
-        # pairing — would disagree with residual/weight renorm pairing).
-        q = project_to_torus(q)
-        k = project_to_torus(k)
-        # Per-pair unit ⇒ ambient ‖q‖₂=√(D/2); sphere uses ‖q‖₂=1. Scale so
-        # (q·k) stays cosine-scale for A/B (no /√d_h, same as nGPT sphere path).
-        amb = (self.d_model * 0.5) ** -0.5
-        q = q * amb
-        k = k * amb
+        # RoPE half-split leaves interleaved pairs; retract over full ambient so
+        # project_to_torus alone yields ‖q‖₂≈1 (no duplicate 1/√(d/2) scale).
+        q = project_to_torus(q.transpose(1, 2).contiguous().view(B, S, D))
+        k = project_to_torus(k.transpose(1, 2).contiguous().view(B, S, D))
+        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
 
         # nGPT-style: unit-ambient Q/K → logits are s_qk-scaled cosines (no /√d_h).
         scale = self.s_qk.to(dtype=q.dtype)
