@@ -92,6 +92,7 @@ class RiemannianSudokuSolver(nn.Module):
         num_steps: int = 8,
         dt: float = 0.5,
         kinetic_weight: float = 0.05,
+        gauge_kinetic_weight: float = 0.0,
         constraint_weight: float = 0.1,
         supervise_all_steps: bool = False,
         mixer: str = 'euclid_axial',
@@ -104,6 +105,7 @@ class RiemannianSudokuSolver(nn.Module):
         self.num_steps = num_steps
         self.dt = dt
         self.kinetic_weight = kinetic_weight
+        self.gauge_kinetic_weight = gauge_kinetic_weight
         self.constraint_weight = constraint_weight
         self.supervise_all_steps = supervise_all_steps
 
@@ -203,7 +205,7 @@ class RiemannianSudokuSolver(nn.Module):
             s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
             s = torch.where(clues.unsqueeze(-1), s_clue, s)
             states.append(s)
-        # Stash last gauge velocity for tests / diagnostics (not used by loss).
+        # Stash for diagnostics + optional gauge kinetic (λ_g via forward).
         self._last_gauge = g
         self._last_gauge_velocities = gauge_velocities
         return s, velocities, states, g
@@ -233,9 +235,11 @@ class RiemannianSudokuSolver(nn.Module):
         """
         if self.mixer == 'cross_coupled':
             s, velocities, states, g = self._integrate_cross_coupled(puzzle)
+            gauge_velocities = self._last_gauge_velocities
         else:
             s, velocities, states = self._integrate_euclid_axial(puzzle)
             g = None
+            gauge_velocities = None
 
         probs = s.square()
         pred = probs.argmax(dim=-1) + 1  # digits 1-9
@@ -260,17 +264,26 @@ class RiemannianSudokuSolver(nn.Module):
         else:
             task_loss = self._blank_nll(probs, solution, mask)
 
-        # Kinetic on cell velocities only; gauge v_g is intentionally unregularized
-        # (loss recipe unchanged vs euclid_axial — do not "fix" by accident).
+        # Cell kinetic (always); gauge kinetic optional (λ_g=0 default — axial unchanged).
         kinetic = velocities[-1].square().mean()
+        if gauge_velocities is not None:
+            gauge_kinetic = gauge_velocities[-1].square().mean()
+        else:
+            gauge_kinetic = kinetic.new_zeros(())
         constraint = unit_sum_penalty(probs, self.group_indices)
-        loss = task_loss + self.kinetic_weight * kinetic + self.constraint_weight * constraint
+        loss = (
+            task_loss
+            + self.kinetic_weight * kinetic
+            + self.gauge_kinetic_weight * gauge_kinetic
+            + self.constraint_weight * constraint
+        )
 
         out.update(
             {
                 'loss': loss,
                 'task_loss': task_loss.detach(),
                 'kinetic_loss': kinetic.detach(),
+                'gauge_kinetic_loss': gauge_kinetic.detach(),
                 'constraint_loss': constraint.detach(),
             }
         )

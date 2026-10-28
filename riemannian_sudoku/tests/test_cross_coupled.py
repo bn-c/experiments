@@ -86,12 +86,38 @@ def test_cross_coupled_forward_backward() -> None:
     out = model(puzzle, solution, mask)
     assert torch.isfinite(out['loss'])
     assert 'g' in out
+    assert 'gauge_kinetic_loss' in out
     out['loss'].backward()
     grads = [p.grad.abs().sum().item() for p in model.parameters() if p.grad is not None]
     assert sum(grads) > 0.0
     # Gauge should have moved from init (untrained net, almost surely).
     g0 = init_t2_gauge(4)
     assert not torch.allclose(out['g'], g0, atol=1e-4)
+
+
+def test_gauge_kinetic_weight_affects_loss() -> None:
+    """λ_g=0 leaves loss = task + λ_k·kin; λ_g>0 adds gauge term (cells still separate)."""
+    torch.manual_seed(3)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    off = _cc_model(num_steps=2, kinetic_weight=0.05, gauge_kinetic_weight=0.0, constraint_weight=0.0)
+    on = _cc_model(num_steps=2, kinetic_weight=0.05, gauge_kinetic_weight=0.5, constraint_weight=0.0)
+    on.load_state_dict(off.state_dict())
+    with torch.no_grad():
+        a = off(puzzle, solution, mask)
+        b = on(puzzle, solution, mask)
+    assert torch.allclose(a['kinetic_loss'], b['kinetic_loss'])
+    assert a['gauge_kinetic_loss'].item() > 0.0
+    assert torch.allclose(a['gauge_kinetic_loss'], b['gauge_kinetic_loss'])
+    expected = a['loss'] + 0.5 * a['gauge_kinetic_loss']
+    assert torch.allclose(b['loss'], expected, atol=1e-5)
+    # Axial path: gauge kinetic is zero and λ_g does not change loss.
+    ax = RiemannianSudokuSolver(
+        d_model=32, n_heads=4, num_steps=2, kinetic_weight=0.05, gauge_kinetic_weight=0.5, constraint_weight=0.0
+    )
+    ax_out = ax(puzzle, solution, mask)
+    assert ax_out['gauge_kinetic_loss'].item() == 0.0
 
 
 def test_euclid_axial_still_default() -> None:

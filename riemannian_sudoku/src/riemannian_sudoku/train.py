@@ -135,6 +135,7 @@ def _save_ckpt(
                 'val_size': args.val_size,
                 'seed': args.seed,
                 'kinetic_weight': args.kinetic_weight,
+                'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
@@ -203,6 +204,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         num_steps=args.num_steps,
         dt=args.dt,
         kinetic_weight=args.kinetic_weight,
+        gauge_kinetic_weight=args.gauge_kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
         mixer=args.mixer,
@@ -277,6 +279,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'early_stop_drop': args.early_stop_drop,
                 'early_stop_patience': args.early_stop_patience,
                 'kinetic_weight': args.kinetic_weight,
+                'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
@@ -334,6 +337,7 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/loss': float(out['loss'].detach()),
             'train/task': float(out['task_loss']),
             'train/kinetic': float(out['kinetic_loss']),
+            'train/gauge_kinetic': float(out['gauge_kinetic_loss']),
             'train/constraint': float(out['constraint_loss']),
             'train/blank_acc': blank_acc,
             'train/exact_board': exact,
@@ -346,11 +350,22 @@ def train_cmd(args: argparse.Namespace) -> None:
         pbar.set_postfix(
             loss=f'{metrics["train/loss"]:.3f}',
             blank=f'{blank_acc:.2f}',
+            kin=f'{metrics["train/kinetic"]:.3f}',
             row=f'{units["row_acc"]:.2f}',
         )
         pbar.update(1)
-        if wandb_run is not None and step % args.log_every == 0:
-            wandb_run.log(metrics, step=step)
+        if step % args.log_every == 0:
+            logger.info(
+                'step %d train loss=%.4f task=%.4f kinetic=%.6f gauge_kinetic=%.6f blank=%.4f',
+                step,
+                metrics['train/loss'],
+                metrics['train/task'],
+                metrics['train/kinetic'],
+                metrics['train/gauge_kinetic'],
+                blank_acc,
+            )
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=step)
 
         if step % args.eval_every == 0 or step == args.steps:
             val = evaluate(model, val_loader, device)
@@ -571,7 +586,13 @@ def main() -> None:
     t.add_argument('--wandb-name', type=str, default='', help='Optional W&B run name')
     t.add_argument('--no-wandb', action='store_true')
     t.add_argument('--no-augment', action='store_true')
-    t.add_argument('--kinetic-weight', type=float, default=0.05, help='λ_k on final-step velocity energy')
+    t.add_argument('--kinetic-weight', type=float, default=0.05, help='λ_k on final-step cell velocity energy')
+    t.add_argument(
+        '--gauge-kinetic-weight',
+        type=float,
+        default=0.0,
+        help='λ_g on final-step gauge velocity energy (cross_coupled only; 0=off, axial unchanged)',
+    )
     t.add_argument('--constraint-weight', type=float, default=0.1, help='λ_c on unit-sum MSE')
     t.add_argument(
         '--supervise-all-steps',
