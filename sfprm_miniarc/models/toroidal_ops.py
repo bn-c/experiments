@@ -10,6 +10,8 @@ Not paper-faithful SFPRM — torus A/B experiment only.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 
@@ -37,14 +39,19 @@ def nlerp(u: torch.Tensor, v: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
 
 
 def _perp_unit_2d(u: torch.Tensor, v: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Unit vector in R^2 span{u,v} orthogonal to u (pairs: [..., 2])."""
-    proj = v - (u * v).sum(dim=-1, keepdim=True) * u
-    norm = proj.norm(dim=-1, keepdim=True)
-    ok = norm > eps
-    fallback = torch.stack((-u[..., 1], u[..., 0]), dim=-1)
-    fallback = fallback - (u * fallback).sum(dim=-1, keepdim=True) * u
-    fallback = fallback / fallback.norm(dim=-1, keepdim=True).clamp_min(eps)
-    return torch.where(ok, proj / norm.clamp_min(eps), fallback)
+    """Analytic unit normal to u in R^2: (-u_y, u_x).
+
+    Always use the closed-form 2D rotate — Gram–Schmidt ``P_u v`` is float-noise
+    when ``v≈-u`` and can return a vector nearly parallel to u (antipodal arc bug).
+    ``v`` / ``eps`` kept for call-site compatibility; orientation matches ``sign`` of
+    the continuous perp so the short arc from u toward v is preserved when defined.
+    """
+    del eps
+    # Analytic ⊥: J u = (-u_y, u_x). Flip if ⟨Ju, v⟩ < 0 so arc heads toward v.
+    e = torch.stack((-u[..., 1], u[..., 0]), dim=-1)
+    # When v≈-u, ⟨e,v⟩≈0 — keep +e (deterministic); mid-arc is still ±e ⊥ u.
+    flip = (e * v).sum(dim=-1, keepdim=True) < 0
+    return torch.where(flip, -e, e)
 
 
 def torus_interp(
@@ -86,7 +93,8 @@ def torus_interp(
     near = near / near.norm(dim=-1, keepdim=True).clamp_min(eps)
 
     e = _perp_unit_2d(up, vp, eps=eps)
-    arc = torch.cos(eta_p * omega) * up + torch.sin(eta_p * omega) * e
+    # Use Ω=π exactly (c is float-clamped off −1); keeps mid-arc ⊥ u.
+    arc = torch.cos(eta_p * math.pi) * up + torch.sin(eta_p * math.pi) * e
     arc = arc / arc.norm(dim=-1, keepdim=True).clamp_min(eps)
 
     out = torch.where(c > 1.0 - eps_omega, near, slerp)

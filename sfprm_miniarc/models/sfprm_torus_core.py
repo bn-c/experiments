@@ -3,6 +3,9 @@
 Parallel copy of sfprm_core with product-of-circles geometry from toroidal_ops.
 Sphere baseline (sfprm_core / spherical_ops) is untouched. Not paper-faithful.
 
+Q/K attention: interleaved torus project → RoPE → re-project (RoPE half-split
+leaves interleaved pairs) → scale by 1/√(d/2) for unit ambient (sphere logit scale).
+
 Desk default dims match sphere: d_model=384, n_heads=8, d_ff=1536, n_layers=2.
 """
 
@@ -168,8 +171,19 @@ class NGPTLayer(nn.Module):
         cos = cos.to(dtype=q.dtype, device=q.device)
         sin = sin.to(dtype=q.dtype, device=q.device)
         q, k = apply_rope(q, k, cos, sin)
+        # Choice (documented): keep interleaved product-torus pairs for the latent
+        # manifold; RoPE uses half-split (i, i+Dh/2) so it leaves that torus.
+        # Retract Q/K onto interleaved pairs before attention (not RoPE-aligned
+        # pairing — would disagree with residual/weight renorm pairing).
+        q = project_to_torus(q)
+        k = project_to_torus(k)
+        # Per-pair unit ⇒ ambient ‖q‖₂=√(D/2); sphere uses ‖q‖₂=1. Scale so
+        # (q·k) stays cosine-scale for A/B (no /√d_h, same as nGPT sphere path).
+        amb = (self.d_model * 0.5) ** -0.5
+        q = q * amb
+        k = k * amb
 
-        # nGPT-style: unit Q/K → logits are s_qk-scaled cosines (no /√d_h).
+        # nGPT-style: unit-ambient Q/K → logits are s_qk-scaled cosines (no /√d_h).
         scale = self.s_qk.to(dtype=q.dtype)
         logits = (q * scale) @ k.transpose(-2, -1)
         if pad_mask is not None:
