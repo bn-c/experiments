@@ -3,9 +3,10 @@
 Parallel copy of sfprm_core with product-of-circles geometry from toroidal_ops.
 Sphere baseline (sfprm_core / spherical_ops) is untouched. Not paper-faithful.
 
-``project_to_torus`` bakes unit ambient (pair radius 1/√n_pairs) for latents,
-weights, and Q/K. Attention: project → RoPE → re-project over full ambient
-(interleaved pairs; RoPE half-split leaves the torus) — no extra Q/K scale.
+Latents/weights: half-split pairs + unit ambient. Q/K: project **per head**
+(half-split on head_dim = RoPE planes) then RoPE — **no post-RoPE reproject**;
+scale by ``1/√n_heads`` so full ambient ‖q‖₂≈1 like sphere. ``s_qk`` floored
+at 1.0; train_torus excludes scalars from AdamW WD (L0 attn-death ablate).
 
 Desk default dims match sphere: d_model=384, n_heads=8, d_ff=1536, n_layers=2.
 """
@@ -160,27 +161,25 @@ class NGPTLayer(nn.Module):
         if variational_mask is not None:
             z = z * variational_mask
 
-        q = project_to_torus(self._linear(self.q_proj, z))
-        k = project_to_torus(self._linear(self.k_proj, z))
-        v = self._linear(self.v_proj, z)
-
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        # Project per-head after view so half-split pairs == RoPE 2-planes.
+        q = self._linear(self.q_proj, z).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self._linear(self.k_proj, z).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self._linear(self.v_proj, z).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        q = project_to_torus(q)
+        k = project_to_torus(k)
+        # Per-head unit ambient → full ‖q‖₂=√H; match sphere full-unit with 1/√H.
+        head_amb = self.n_heads**-0.5
+        q = q * head_amb
+        k = k * head_amb
 
         cos, sin = self.rope(S)
         cos = cos.to(dtype=q.dtype, device=q.device)
         sin = sin.to(dtype=q.dtype, device=q.device)
+        # On-manifold RoPE (no reproject warp).
         q, k = apply_rope(q, k, cos, sin)
-        # RoPE half-split leaves interleaved pairs; retract over full ambient so
-        # project_to_torus alone yields ‖q‖₂≈1 (no duplicate 1/√(d/2) scale).
-        q = project_to_torus(q.transpose(1, 2).contiguous().view(B, S, D))
-        k = project_to_torus(k.transpose(1, 2).contiguous().view(B, S, D))
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # nGPT-style: unit-ambient Q/K → logits are s_qk-scaled cosines (no /√d_h).
-        scale = self.s_qk.to(dtype=q.dtype)
+        # Floor s_qk≥1 (mi4ewn6u L0 collapsed to ~0.35 under AdamW WD).
+        scale = self.s_qk.to(dtype=q.dtype).clamp_min(1.0)
         logits = (q * scale) @ k.transpose(-2, -1)
         if pad_mask is not None:
             # pad_mask [B, S] True=valid; block attention to PAD keys
