@@ -278,7 +278,7 @@ def test_cross_mlp_swiglu_two_layers() -> None:
 
 
 def test_cross_mlp_silu_expand_topology() -> None:
-    """``--mlp-width expand`` + silu: 729→1458→SiLU→1458→SiLU→729 (~4.25M)."""
+    """``--mlp-width expand --no-gauge``: cells-only 729→1458→SiLU→1458→SiLU→729 (~4.25M)."""
     torch.manual_seed(7)
     m = _cc_model(
         use_gauge=False,
@@ -288,6 +288,7 @@ def test_cross_mlp_silu_expand_topology() -> None:
         constraint_weight=0.0,
     )
     assert m.mlp_width == 'expand'
+    assert m.use_gauge is False
     mlp = m.cross_mlp
     assert isinstance(mlp[0], nn.Linear) and mlp[0].out_features == 1458
     assert isinstance(mlp[1], nn.SiLU)
@@ -308,6 +309,43 @@ def test_cross_mlp_silu_expand_topology() -> None:
     out = m(puzzle, solution, mask)
     assert torch.isfinite(out['loss'])
     assert 'g' not in out
+    out['loss'].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+
+
+def test_cross_mlp_silu_expand_live_gauge() -> None:
+    """Default expand SiLU: live T² — 765→1530→SiLU→1530→SiLU→765; MLP updates g."""
+    torch.manual_seed(8)
+    m = _cc_model(
+        mlp_activation='silu',
+        mlp_width='expand',
+        kinetic_weight=0.5,
+        constraint_weight=0.0,
+    )
+    assert m.use_gauge is True
+    mlp = m.cross_mlp
+    assert isinstance(mlp[0], nn.Linear) and mlp[0].in_features == 765 and mlp[0].out_features == 1530
+    assert isinstance(mlp[1], nn.SiLU)
+    assert isinstance(mlp[2], nn.Linear) and mlp[2].in_features == mlp[2].out_features == 1530
+    assert isinstance(mlp[3], nn.SiLU)
+    assert isinstance(mlp[4], nn.Linear) and mlp[4].out_features == 765
+    n = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    # 765·1530+1530 + 1530²+1530 + 1530·765+765
+    assert n == 4_685_625, f'params={n}'
+
+    puzzle = torch.randint(0, 10, (2, 81))
+    puzzle[:, 0] = 5
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    out = m(puzzle, solution, mask)
+    assert 'g' in out
+    assert out['g'].shape == (2, 18, 2)
+    assert torch.allclose(out['g'].norm(dim=-1), torch.ones(2, 18), atol=1e-4)
+    assert torch.isfinite(out['loss'])
+    # MLP produced gauge tangent velocities each step (live ODE, not fixed PE / omitted).
+    gv = m._last_gauge_velocities
+    assert gv is not None and len(gv) == m.num_steps
+    assert all(v.shape == (2, 18, 2) and v.norm() > 0 for v in gv)
     out['loss'].backward()
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
 

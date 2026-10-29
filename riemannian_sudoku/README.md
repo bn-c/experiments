@@ -4,7 +4,8 @@ Peer spike: Sudoku solver on the positive orthant of \(S^8\) (\(p = s^2\)) with
 an Exp-map + abs-renorm retraction. Default mixer `--mixer euclid_axial` uses
 factorized row/col/box axial attention and fixed Clifford \(T^3\) PE.
 `--mixer cross_coupled` replaces that with a live \(T^2\) (row×col) gauge and a
-shared ambient MLP → per-manifold tangent project → parallel Exp.
+shared ambient MLP → per-manifold tangent project → parallel Exp (Method 1+2:
+MLP updates \(g\)). Pass `--no-gauge` only for the cells-only ablation (729 MLP).
 `--mixer geo_karcher` / `geo_log` are cells-only geodesic affinities + 2-step
 Karcher (state←mean, or `v=Log` then Exp).
 

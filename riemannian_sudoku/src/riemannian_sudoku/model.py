@@ -217,11 +217,13 @@ class RiemannianSudokuSolver(nn.Module):
     ``euclid_axial`` (default): concat ``[s, T3]`` → Linear → axial → velocity →
     tangent project → clue freeze → Exp + abs-renorm.
 
-    ``cross_coupled``: concat flatten(s)+flatten(g) → MLP → per-manifold tangent
-    project → parallel Exp (cell orthant + circle Exp on each S¹ gauge factor).
+    ``cross_coupled`` (default ``use_gauge=True``): live Method 1+2 — init T²
+    (18 row/col circles, θ=2π·idx/9), concat flatten(s)+flatten(g) → MLP →
+    (v_s, v_g), tangent project, parallel Exp (cell orthant + S¹ on each circle).
+    Gauge is ODE state updated by the MLP vector field (not fixed PE).
 
-    ``use_gauge=False`` (``--no-gauge``): cells-only ablation — flatten(s) → MLP →
-    cell tangent only (729→MLP→729); no live T² state / dynamics / λ_g.
+    ``use_gauge=False`` (``--no-gauge``): true cells-only ablation for prior A/Bs —
+    flatten(s) → MLP → cell tangent only (729→MLP→729); no T² init / v_g / λ_g.
 
     ``geo_karcher`` / ``geo_log``: cells-only geodesic affinities + 2-step Karcher;
     (1) state ← mean, or (2) ``v = Log_x(m)`` then Exp + orthant + kinetic.
@@ -285,8 +287,8 @@ class RiemannianSudokuSolver(nn.Module):
             )
             self.register_buffer('t3_pe', _torus_t3_pe(), persistent=True)
         elif mixer == 'cross_coupled':
-            # With gauge: 765→H→…→765; --no-gauge: 729→H→…→729 (cells only).
-            # default H=512; expand H=2·in_dim (no-gauge: 1458 → mid-heavy ~4.25M).
+            # Live T²: 765→H→…→765; --no-gauge cells-only: 729→H→…→729.
+            # default H=512; expand H=2·in_dim (gauge: 1530; cells-only: 1458).
             # gelu/silu: mid Linear(s); swiglu: mid SwiGLU(s) with fair mid width.
             in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
             out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S

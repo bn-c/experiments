@@ -707,7 +707,10 @@ def main() -> None:
     t.add_argument(
         '--no-gauge',
         action='store_true',
-        help='cross_coupled cells-only ablation: 729→MLP→729, no live T² (default: with gauge)',
+        help=(
+            'cross_coupled cells-only ablation (omit live T²): 729→MLP→729. '
+            'Default OFF = Method 1+2 live T² init + MLP updates g (765→MLP→765)'
+        ),
     )
     t.add_argument(
         '--mlp-activation',
@@ -727,7 +730,10 @@ def main() -> None:
         type=str,
         default=None,
         choices=['default', 'expand'],
-        help='cross_coupled MLP hidden: default=512; expand=2·in_dim (no-gauge: 1458); on --resume reads ckpt',
+        help=(
+            'cross_coupled MLP hidden: default=512; expand=2·in_dim '
+            '(live gauge: 1530; --no-gauge: 1458); on --resume reads ckpt'
+        ),
     )
     t.add_argument(
         '--compile',
@@ -768,7 +774,7 @@ def main() -> None:
     e.add_argument(
         '--no-gauge',
         action='store_true',
-        help='force cells-only cross_coupled; default reads ckpt args',
+        help='force cells-only (omit live T²); default reads ckpt args',
     )
     e.add_argument(
         '--mlp-activation',

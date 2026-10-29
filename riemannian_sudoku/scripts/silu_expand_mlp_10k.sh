@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# SiLU expanded MLP 10k: 729→1458→SiLU→1458→SiLU→729 on cross_coupled --no-gauge.
-# Compare to SiLU cliff 3i4zt8kr (contracted) and SwiGLU W1 aychd5jf.
+# SiLU expanded MLP 10k: live T² gauge + expand width.
+# Topology: 765→1530→SiLU→1530→SiLU→765 (Method 1+2: MLP updates g).
+# Do NOT pass --no-gauge (that flag is cells-only 729 for prior A/Bs).
+# Compare to SiLU cliff 3i4zt8kr (contracted cells-only) and SwiGLU W1 aychd5jf.
 # Recipe: λ_k=0.5, batch 128, lr≈1.414e-4 cosine T_max=10k, ES drop 0.05, seed 42.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -18,15 +20,15 @@ SEED="${SEED:-42}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
 mkdir -p logs checkpoints/silu-expand-mlp
-name="cc-silu-expand-nogauge-lk0.5-b${BATCH}-s${STEPS}"
+name="cc-silu-expand-live-t2-lk0.5-b${BATCH}-s${STEPS}"
 ckpt="checkpoints/silu-expand-mlp/${name}"
 log="logs/${name}.log"
 SUMMARY="logs/silu-expand-mlp-summary.txt"
 mkdir -p "$ckpt"
 : >"$SUMMARY"
 
-echo "=== $name (silu --mlp-width expand) ===" | tee -a "$SUMMARY"
-echo "REF SiLU cliff 3i4zt8kr / SwiGLU W1 aychd5jf" | tee -a "$SUMMARY"
+echo "=== $name (silu --mlp-width expand, live T²) ===" | tee -a "$SUMMARY"
+echo "REF SiLU cliff 3i4zt8kr / SwiGLU W1 aychd5jf / prior cells-only expand sgt3lvs6" | tee -a "$SUMMARY"
 
 uv run riemannian-sudoku train \
   --train-size "$TRAIN_SIZE" --val-size "$VAL_SIZE" \
@@ -38,7 +40,7 @@ uv run riemannian-sudoku train \
   --eval-every "$EVAL_EVERY" --log-every "$LOG_EVERY" \
   --ckpt-every 1000 --num-workers 4 --pin-memory \
   --seed "$SEED" \
-  --mixer cross_coupled --no-gauge \
+  --mixer cross_coupled \
   --mlp-activation silu --mlp-width expand \
   --ckpt-dir "$ckpt" --wandb-name "$name" \
   >"$log" 2>&1
