@@ -25,6 +25,7 @@ _CROSS_S = 81 * 9  # 729
 _CROSS_G = 18 * 2  # 36
 _CROSS_H = 512
 _MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
+_MLP_WIDTHS = ('default', 'expand')
 _MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log')
 _GEO_MIXERS = ('geo_karcher', 'geo_log')
 _GEO_KARCHER_STEPS = 2
@@ -240,6 +241,7 @@ class RiemannianSudokuSolver(nn.Module):
         use_gauge: bool = True,
         mlp_activation: str = 'gelu',
         mlp_layers: int = 1,
+        mlp_width: str = 'default',
     ) -> None:
         super().__init__()
         if mixer not in _MIXERS:
@@ -248,12 +250,15 @@ class RiemannianSudokuSolver(nn.Module):
             raise ValueError(f'unknown mlp_activation {mlp_activation!r}; expected gelu|silu|swiglu')
         if mlp_layers < 1:
             raise ValueError(f'mlp_layers must be >= 1, got {mlp_layers}')
+        if mlp_width not in _MLP_WIDTHS:
+            raise ValueError(f'unknown mlp_width {mlp_width!r}; expected default|expand')
         self.mixer = mixer
         # Gauge only exists on the cross_coupled path; axial / geo ignore the flag.
         self.use_gauge = bool(use_gauge) and mixer == 'cross_coupled'
         # Axial / geo stay free of MLP activation; flag only selects cross ambient MLP.
         self.mlp_activation = mlp_activation if mixer == 'cross_coupled' else 'gelu'
         self.mlp_layers = int(mlp_layers) if mixer == 'cross_coupled' else 1
+        self.mlp_width = mlp_width if mixer == 'cross_coupled' else 'default'
         self.d_model = d_model
         self.num_steps = num_steps
         self.dt = dt
@@ -280,12 +285,14 @@ class RiemannianSudokuSolver(nn.Module):
             )
             self.register_buffer('t3_pe', _torus_t3_pe(), persistent=True)
         elif mixer == 'cross_coupled':
-            # With gauge: 765→512→…→765; --no-gauge: 729→512→…→729 (cells only).
-            # gelu/silu: mid Linear(s); swiglu: mid SwiGLU(s) with h≈170 (fair params).
+            # With gauge: 765→H→…→765; --no-gauge: 729→H→…→729 (cells only).
+            # default H=512; expand H=2·in_dim (no-gauge: 1458 → mid-heavy ~4.25M).
+            # gelu/silu: mid Linear(s); swiglu: mid SwiGLU(s) with fair mid width.
             in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
             out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S
+            hidden = (2 * in_dim) if self.mlp_width == 'expand' else _CROSS_H
             self.cross_mlp = _cross_mlp(
-                in_dim, out_dim, _CROSS_H, self.mlp_activation, n_layers=self.mlp_layers
+                in_dim, out_dim, hidden, self.mlp_activation, n_layers=self.mlp_layers
             )
         else:
             # geo_karcher / geo_log: cells-only geometric attention (no gauge, no MLP v).

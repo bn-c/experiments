@@ -66,6 +66,15 @@ def _resolve_mlp_layers(cli_layers: int | None, ckpt_args: dict | None = None) -
     return 1
 
 
+def _resolve_mlp_width(cli_width: str | None, ckpt_args: dict | None = None) -> str:
+    """CLI ``--mlp-width`` wins; else ckpt; else ``default`` (hidden=512)."""
+    if cli_width:
+        return cli_width
+    if ckpt_args is not None and 'mlp_width' in ckpt_args:
+        return str(ckpt_args['mlp_width'])
+    return 'default'
+
+
 def _cosine_t_max(*, steps: int, step: int, lr_cosine_steps: int) -> int | None:
     """CosineAnnealingLR ``T_max``, or ``None`` to hold the floor (past horizon).
 
@@ -183,6 +192,7 @@ def _save_ckpt(
                 'use_gauge': args.use_gauge,
                 'mlp_activation': args.mlp_activation,
                 'mlp_layers': args.mlp_layers,
+                'mlp_width': args.mlp_width,
             },
         },
         path,
@@ -243,6 +253,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
     args.mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
+    args.mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
 
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
@@ -257,8 +268,10 @@ def train_cmd(args: argparse.Namespace) -> None:
         use_gauge=args.use_gauge,
         mlp_activation=args.mlp_activation,
         mlp_layers=args.mlp_layers,
+        mlp_width=args.mlp_width,
     ).to(device)
     args.mlp_layers = int(model.mlp_layers)
+    args.mlp_width = str(model.mlp_width)
     # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
     args.use_gauge = bool(model.use_gauge)
     if args.compile:
@@ -348,6 +361,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'use_gauge': args.use_gauge,
                 'mlp_activation': args.mlp_activation,
                 'mlp_layers': args.mlp_layers,
+                'mlp_width': args.mlp_width,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -575,6 +589,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'USE_GAUGE={int(args.use_gauge)}')
     print(f'MLP_ACTIVATION={args.mlp_activation}')
     print(f'MLP_LAYERS={args.mlp_layers}')
+    print(f'MLP_WIDTH={args.mlp_width}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -588,6 +603,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
     use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
     mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
+    mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -597,6 +613,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
         use_gauge=use_gauge,
         mlp_activation=mlp_activation,
         mlp_layers=mlp_layers,
+        mlp_width=mlp_width,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -706,6 +723,13 @@ def main() -> None:
         help='cross_coupled mid nonlinear blocks (default 1; swiglu: SwiGLU×N; on --resume reads ckpt)',
     )
     t.add_argument(
+        '--mlp-width',
+        type=str,
+        default=None,
+        choices=['default', 'expand'],
+        help='cross_coupled MLP hidden: default=512; expand=2·in_dim (no-gauge: 1458); on --resume reads ckpt',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -758,6 +782,13 @@ def main() -> None:
         type=int,
         default=None,
         help='override cross MLP mid-block count; default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-width',
+        type=str,
+        default=None,
+        choices=['default', 'expand'],
+        help='override cross MLP hidden width; default reads ckpt args',
     )
 
     args = parser.parse_args()

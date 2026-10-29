@@ -277,6 +277,41 @@ def test_cross_mlp_swiglu_two_layers() -> None:
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in deep.parameters())
 
 
+def test_cross_mlp_silu_expand_topology() -> None:
+    """``--mlp-width expand`` + silu: 729→1458→SiLU→1458→SiLU→729 (~4.25M)."""
+    torch.manual_seed(7)
+    m = _cc_model(
+        use_gauge=False,
+        mlp_activation='silu',
+        mlp_width='expand',
+        kinetic_weight=0.5,
+        constraint_weight=0.0,
+    )
+    assert m.mlp_width == 'expand'
+    mlp = m.cross_mlp
+    assert isinstance(mlp[0], nn.Linear) and mlp[0].out_features == 1458
+    assert isinstance(mlp[1], nn.SiLU)
+    assert isinstance(mlp[2], nn.Linear) and mlp[2].in_features == mlp[2].out_features == 1458
+    assert isinstance(mlp[3], nn.SiLU)
+    assert isinstance(mlp[4], nn.Linear) and mlp[4].out_features == 729
+    n = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    # 729·1458+1458 + 1458²+1458 + 1458·729+729
+    assert n == 4_255_173, f'params={n}'
+    # Default GELU/SwiGLU paths unchanged.
+    gelu = _cc_model(use_gauge=False, mlp_activation='gelu')
+    assert gelu.mlp_width == 'default'
+    assert sum(p.numel() for p in gelu.parameters() if p.requires_grad) == 1_010_393
+    puzzle = torch.randint(0, 10, (2, 81))
+    puzzle[:, 0] = 5
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    out = m(puzzle, solution, mask)
+    assert torch.isfinite(out['loss'])
+    assert 'g' not in out
+    out['loss'].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+
+
 def test_resolve_mlp_activation() -> None:
     from riemannian_sudoku.train import _resolve_mlp_activation
 
@@ -296,6 +331,15 @@ def test_resolve_mlp_layers() -> None:
     assert _resolve_mlp_layers(0, {'mlp_layers': 2}) == 2  # 0 = unset → ckpt
 
 
+def test_resolve_mlp_width() -> None:
+    from riemannian_sudoku.train import _resolve_mlp_width
+
+    assert _resolve_mlp_width(None) == 'default'
+    assert _resolve_mlp_width(None, {}) == 'default'
+    assert _resolve_mlp_width(None, {'mlp_width': 'expand'}) == 'expand'
+    assert _resolve_mlp_width('expand', {'mlp_width': 'default'}) == 'expand'
+
+
 def test_unknown_mlp_activation_raises() -> None:
     try:
         RiemannianSudokuSolver(mixer='cross_coupled', mlp_activation='relu')
@@ -310,5 +354,14 @@ def test_mlp_layers_lt_one_raises() -> None:
         RiemannianSudokuSolver(mixer='cross_coupled', mlp_layers=0)
     except ValueError as e:
         assert 'mlp_layers' in str(e)
+    else:
+        raise AssertionError('expected ValueError')
+
+
+def test_unknown_mlp_width_raises() -> None:
+    try:
+        RiemannianSudokuSolver(mixer='cross_coupled', mlp_width='wide')
+    except ValueError as e:
+        assert 'wide' in str(e)
     else:
         raise AssertionError('expected ValueError')
