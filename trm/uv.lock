@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -405,8 +405,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -1047,28 +1047,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pytorch-triton-rocm"
-version = "3.5.0+git7416ffcb"
-source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }
-resolution-markers = [
-    "sys_platform != 'emscripten' and sys_platform != 'win32'",
-]
-wheels = [
-    { url = "https://download-r2.pytorch.org/whl/nightly/pytorch_triton_rocm-3.5.0%2Bgit7416ffcb-cp312-cp312-linux_x86_64.whl", upload-time = "2025-11-05T17:47:02Z" },
-    { url = "https://download-r2.pytorch.org/whl/nightly/pytorch_triton_rocm-3.5.0%2Bgit7416ffcb-cp313-cp313-linux_x86_64.whl", upload-time = "2025-11-05T17:47:05Z" },
-    { url = "https://download-r2.pytorch.org/whl/nightly/pytorch_triton_rocm-3.5.0%2Bgit7416ffcb-cp313-cp313t-linux_x86_64.whl", upload-time = "2025-11-05T17:47:08Z" },
-]
-
-[[package]]
-name = "pytorch-triton-rocm"
-version = "3.6.0+git8fedd49b"
-source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }
-resolution-markers = [
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-]
-
-[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1177,22 +1155,21 @@ wheels = [
 
 [[package]]
 name = "torch"
-version = "2.10.0.dev20251031+rocm6.4"
-source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }
+version = "2.14.0.dev20260804+rocm7.1"
+source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
     { name = "networkx" },
-    { name = "pytorch-triton-rocm", version = "3.5.0+git7416ffcb", source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }, marker = "sys_platform == 'linux'" },
     { name = "setuptools" },
     { name = "sympy" },
+    { name = "triton-rocm", version = "3.8.0+git10f6be36", source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }, marker = "sys_platform == 'linux'" },
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/nightly/rocm6.4/torch-2.10.0.dev20251031%2Brocm6.4-cp312-cp312-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/nightly/rocm6.4/torch-2.10.0.dev20251031%2Brocm6.4-cp313-cp313-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/nightly/rocm6.4/torch-2.10.0.dev20251031%2Brocm6.4-cp313-cp313t-manylinux_2_28_x86_64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/nightly/rocm7.1/torch-2.14.0.dev20260804%2Brocm7.1-cp312-cp312-manylinux_2_28_x86_64.whl", upload-time = "2026-08-04T22:10:16Z" },
+    { url = "https://download-r2.pytorch.org/whl/nightly/rocm7.1/torch-2.14.0.dev20260804%2Brocm7.1-cp313-cp313-manylinux_2_28_x86_64.whl", upload-time = "2026-08-04T22:07:00Z" },
 ]
 
 [[package]]
@@ -1205,6 +1182,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl", hash = "sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73", size = 80199, upload-time = "2026-09-11T07:25:14.599Z" },
+]
+
+[[package]]
+name = "triton-rocm"
+version = "3.8.0+git10f6be36"
+source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }
+resolution-markers = [
+    "sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+wheels = [
+    { url = "https://download-r2.pytorch.org/whl/nightly/triton_rocm-3.8.0%2Bgit10f6be36-cp312-cp312-linux_x86_64.whl", upload-time = "2026-08-05T01:04:34Z" },
+    { url = "https://download-r2.pytorch.org/whl/nightly/triton_rocm-3.8.0%2Bgit10f6be36-cp313-cp313-linux_x86_64.whl", upload-time = "2026-08-05T01:04:39Z" },
+]
+
+[[package]]
+name = "triton-rocm"
+version = "3.9.0+gitfc8d31a5"
+source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }
+resolution-markers = [
+    "sys_platform == 'win32'",
+    "sys_platform == 'emscripten'",
 ]
 
 [[package]]
@@ -1225,8 +1223,8 @@ dependencies = [
 
 [package.optional-dependencies]
 rocm = [
-    { name = "pytorch-triton-rocm", version = "3.5.0+git7416ffcb", source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "pytorch-triton-rocm", version = "3.6.0+git8fedd49b", source = { registry = "https://download.pytorch.org/whl/nightly/rocm6.4" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "triton-rocm", version = "3.8.0+git10f6be36", source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }, marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "triton-rocm", version = "3.9.0+gitfc8d31a5", source = { registry = "https://download.pytorch.org/whl/nightly/rocm7.1" }, marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
@@ -1244,9 +1242,9 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
-    { name = "pytorch-triton-rocm", marker = "extra == 'rocm'", index = "https://download.pytorch.org/whl/nightly/rocm6.4" },
-    { name = "torch", specifier = ">=2.4.0", index = "https://download.pytorch.org/whl/nightly/rocm6.4" },
+    { name = "torch", specifier = ">=2.4.0", index = "https://download.pytorch.org/whl/nightly/rocm7.1" },
     { name = "tqdm", specifier = ">=4.66.0" },
+    { name = "triton-rocm", marker = "extra == 'rocm'", index = "https://download.pytorch.org/whl/nightly/rocm7.1" },
     { name = "wandb", specifier = ">=0.24.2" },
 ]
 provides-extras = ["rocm"]

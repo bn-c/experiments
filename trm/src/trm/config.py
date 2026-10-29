@@ -41,6 +41,10 @@ class TrainConfig(BaseSettings):
 
     batch_size: int = 32
     epochs: int = 1
+    max_steps: int | None = Field(
+        default=None,
+        description='If set, train for this many optimizer steps (ignores epochs)',
+    )
     lr: float = 1e-4
     weight_decay: float = 1.0
     ema_decay: float = 0.999
@@ -51,6 +55,12 @@ class TrainConfig(BaseSettings):
     seed: int = 42
     val_size: int = Field(default=500, description='Validation holdout count from HF train head')
     split_seed: int = Field(default=42, description='Seed for deterministic train/val split')
+    lr_schedule: str = Field(default='constant', description='constant | cosine')
+    eval_every: int = Field(default=500, description='Val every N optimizer steps when max_steps set')
+    grad_accum_steps: int = Field(default=1, description='Microbatches per optimizer step')
+    compile: bool = Field(default=False, description='torch.compile backbone')
+    wandb_name: str | None = Field(default=None, description='W&B run name prefix')
+    log_every: int = Field(default=50, description='Train metric log interval (steps)')
 
     model_config = SettingsConfigDict(env_prefix='TRM_TRAIN_')
 

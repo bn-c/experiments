@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 
@@ -24,15 +23,17 @@ def resolve_val_size(n: int, val_size: int, *, fraction: float = 0.05) -> int:
 
 
 def split_train_val(df: pd.DataFrame, val_size: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split a DataFrame into train and validation sets deterministically."""
+    """
+    Hold out the last ``val_size`` rows after a seeded shuffle of the loaded head.
+
+    Matches ``riemannian_sudoku.data.split_train_val`` (pandas ``sample`` + tail holdout)
+    so desk A/B runs share the same seed-42 / val-2048 Sudoku-extreme split.
+    """
     n = len(df)
     if val_size < 1 or val_size >= n:
         msg = f'val_size must be in [1, {n - 1}], got {val_size}'
         raise ValueError(msg)
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-    val_idx = perm[:val_size]
-    train_idx = perm[val_size:]
-    train_df = df.iloc[train_idx].reset_index(drop=True)
-    val_df = df.iloc[val_idx].reset_index(drop=True)
+    shuffled = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    val_df = shuffled.iloc[-val_size:].reset_index(drop=True)
+    train_df = shuffled.iloc[:-val_size].reset_index(drop=True)
     return train_df, val_df

@@ -92,9 +92,12 @@ def log_validation(cell_accuracy: float, puzzle_accuracy: float, step: int) -> N
     if not _wandb_available or wandb.run is None:
         return
 
+    # cell_accuracy is empty-cell / blank accuracy (mask applied in compute_metrics).
+    # Mirror as val/blank_acc for Riemannian A/B comparability.
     wandb.log(
         {
             'val/cell_accuracy': cell_accuracy,
+            'val/blank_acc': cell_accuracy,
             'val/puzzle_accuracy': puzzle_accuracy,
         },
         step=step,
