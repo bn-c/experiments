@@ -139,9 +139,10 @@ class BipartiteSnTmSolver(nn.Module):
         omega_k = omegas[-1]
         scratch_energy = x[..., SCRATCH_START:].square().mean()
         blank_np = x[..., BLANK_COORD].square().mean()
-        # Watch-only: cell-level claim energy (mirrors scratch_energy; house_features math unchanged).
+        # Watch-only: cell-level claim energy (same slice-norm as house_features / _logits).
         p9 = self.poles[:, :N_DIGITS]
-        q = F.relu(x[..., :N_DIGITS] @ p9.T)
+        x9 = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
+        q = F.relu(x9 @ p9.T)
         claim_energy = q.square().mean()
 
         out: dict[str, Tensor] = {
@@ -165,9 +166,13 @@ class BipartiteSnTmSolver(nn.Module):
             mask = (puzzle == 0).float()
         label_smoothing = max(0.0, 1.0 - self.ce_gamma)
         if self.supervise_all_steps:
-            task_loss = torch.stack(
+            ces = torch.stack(
                 [self._blank_ce(self._logits(st), solution, mask, label_smoothing) for st in states]
-            ).mean()
+            )
+            # Linear ramp: w_k = k / Σj (favor later ODE steps over uniform mean).
+            k = ces.shape[0]
+            w = torch.arange(1, k + 1, device=ces.device, dtype=ces.dtype)
+            task_loss = (ces * w).sum() / w.sum()
         else:
             task_loss = self._blank_ce(logits, solution, mask, label_smoothing)
 
