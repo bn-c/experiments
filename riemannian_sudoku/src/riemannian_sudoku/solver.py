@@ -139,6 +139,10 @@ class BipartiteSnTmSolver(nn.Module):
         omega_k = omegas[-1]
         scratch_energy = x[..., SCRATCH_START:].square().mean()
         blank_np = x[..., BLANK_COORD].square().mean()
+        # Watch-only: cell-level claim energy (mirrors scratch_energy; house_features math unchanged).
+        p9 = self.poles[:, :N_DIGITS]
+        q = F.relu(x[..., :N_DIGITS] @ p9.T)
+        claim_energy = q.square().mean()
 
         out: dict[str, Tensor] = {
             's': x,  # train/eval expect 's'; bipartite state is x on S^{63}
@@ -151,6 +155,8 @@ class BipartiteSnTmSolver(nn.Module):
             'omega_sq_k': omega_k.square().mean().detach(),
             'scratch_energy': scratch_energy.detach(),
             'blank_np': blank_np.detach(),
+            'claim_energy': claim_energy.detach(),
+            'logit_scale': self.logit_scale.detach().clamp(max=LOGIT_SCALE_MAX),
         }
         if solution is None:
             return out

@@ -426,12 +426,14 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/lr': float(opt.param_groups[0]['lr']),
             'train/step': step,
         }
-        # Bipartite diags: ||ω_1||², ||ω_K||², scratch energy, North-pole residual.
+        # Bipartite diags: ||ω_1||², ||ω_K||², scratch/claim energy, NP residual, logit_scale.
         for key, wandb_key in (
             ('omega_sq_1', 'train/omega_sq_1'),
             ('omega_sq_k', 'train/omega_sq_k'),
             ('scratch_energy', 'train/scratch_energy'),
             ('blank_np', 'train/blank_np'),
+            ('claim_energy', 'train/claim_energy'),
+            ('logit_scale', 'train/logit_scale'),
         ):
             if key in out:
                 metrics[wandb_key] = float(out[key])
