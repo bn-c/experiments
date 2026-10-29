@@ -44,7 +44,7 @@ class BipartiteSnTmSolver(nn.Module):
         d: int = D,
         m: int = M,
         h_y: int = 320,
-        h_x: int = 448,
+        h_x: int = 432,
         pe_alpha: float = PE_ALPHA,
         omega_weight: float = LAMBDA_OMEGA_DEFAULT,
         ce_gamma: float = CE_GAMMA,

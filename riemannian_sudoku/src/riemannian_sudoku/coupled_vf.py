@@ -22,10 +22,10 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
 class CoupledVectorField(nn.Module):
     """
     Leapfrog pair: house ω from cell aggregates + Clifford ``y_emb``, then cell
-    ambient u from ``[x, y_emb_r, y_emb_c, y_emb_b, pe]``.
+    ambient u from FiLM(cell+PE, house embeds) → mid×2 → out.
 
-    A2 widths ~671k: ``H_Y=320`` (1 mid), ``H_X=448`` (2 mid); ``M=16``,
-    ``in_y=178``, ``in_x=166``.
+    A2 P2 widths ~681k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
+    ``M=16``, ``in_y=178``.
     """
 
     def __init__(
@@ -33,7 +33,7 @@ class CoupledVectorField(nn.Module):
         d: int = D,
         m: int = M,
         h_y: int = 320,
-        h_x: int = 448,
+        h_x: int = 432,
         pe_dim: int = PE_DIM,
     ) -> None:
         super().__init__()
@@ -43,9 +43,18 @@ class CoupledVectorField(nn.Module):
         emb_m = 2 * m  # Clifford cat(cos,sin)
         # mean+std (2d) + sum q + sum q² (2·9) + y_emb (2m)
         in_y = 2 * d + 2 * N_DIGITS + emb_m
-        in_x = d + 3 * emb_m + pe_dim
         self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
-        self.vf_x = _mlp(in_x, h_x, d, n_mid=2)
+        # FiLM first block: cell(+PE) + house shift/gate → H_X; then mid×2 + out.
+        self.x_in_cell = nn.Linear(d + pe_dim, h_x)
+        self.x_in_house_shift = nn.Linear(3 * emb_m, h_x)
+        self.x_in_house_gate = nn.Linear(3 * emb_m, h_x)
+        self.vf_x_body = nn.Sequential(
+            nn.Linear(h_x, h_x),
+            nn.SiLU(),
+            nn.Linear(h_x, h_x),
+            nn.SiLU(),
+            nn.Linear(h_x, d),
+        )
 
     def house_features(
         self,
@@ -93,13 +102,15 @@ class CoupledVectorField(nn.Module):
         cell_house_idx: Tensor,
     ) -> Tensor:
         """
-        Cell ambient velocity ``(B, 81, D)`` from ``[x, y_emb_r/c/b, pe]``.
+        Cell ambient velocity ``(B, 81, D)`` via FiLM(cell+PE, house embeds).
 
         Clifford house embeds gathered with static ``CELL_HOUSE_IDX[81, 3]``.
         """
         y_emb = clifford_embed(y)  # (B, 27, 2M)
         emb_m = 2 * self.m
-        y_c = y_emb[:, cell_house_idx].reshape(x.shape[0], 81, 3 * emb_m)
+        house_in = y_emb[:, cell_house_idx].reshape(x.shape[0], 81, 3 * emb_m)
         pe_b = pe.unsqueeze(0).expand(x.shape[0], -1, -1)
-        inp = torch.cat([x, y_c, pe_b], dim=-1)
-        return self.vf_x(inp)
+        cell_in = torch.cat([x, pe_b], dim=-1)  # (B, 81, D+PE_DIM)
+        base = F.silu(self.x_in_cell(cell_in) + self.x_in_house_shift(house_in))
+        gate = 1.0 + torch.tanh(self.x_in_house_gate(house_in))
+        return self.vf_x_body(base * gate)

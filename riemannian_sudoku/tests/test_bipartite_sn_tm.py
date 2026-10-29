@@ -138,7 +138,7 @@ def test_constant_house_batch_no_nan() -> None:
 def test_bipartite_param_count_target() -> None:
     model = BipartiteSnTmSolver()
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    assert abs(n - 670_993) <= 1, f'n_params={n} expected ≈670993'
+    assert abs(n - 681_441) <= 1, f'n_params={n} expected ≈681441'
     assert 600_000 <= n <= 700_000, f'n_params={n} outside 0.60–0.70M'
     assert model.logit_scale.item() == 12.0
 
