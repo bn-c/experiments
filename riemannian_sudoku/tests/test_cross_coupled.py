@@ -134,28 +134,66 @@ def test_cross_coupled_param_count_and_mlp_shape() -> None:
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert n == 1_047_293, f'unexpected param count {n}'
     assert model.cross_mlp is not None
+    assert model.use_gauge is True
     linears = [m for m in model.cross_mlp if isinstance(m, nn.Linear)]
     shapes = [(m.in_features, m.out_features) for m in linears]
     assert shapes == [(765, 512), (512, 512), (512, 765)]
 
 
+def test_no_gauge_cells_only_mlp_and_forward() -> None:
+    """``use_gauge=False``: 729→MLP→729, no g / gauge_kinetic, still trains."""
+    torch.manual_seed(4)
+    model = _cc_model(use_gauge=False, kinetic_weight=0.5, gauge_kinetic_weight=0.5, constraint_weight=0.0)
+    assert model.use_gauge is False
+    assert model.cross_mlp is not None
+    linears = [m for m in model.cross_mlp if isinstance(m, nn.Linear)]
+    shapes = [(m.in_features, m.out_features) for m in linears]
+    assert shapes == [(729, 512), (512, 512), (512, 729)]
+    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert n == 1_010_393, f'unexpected no-gauge param count {n}'
+
+    puzzle = torch.randint(0, 10, (2, 81))
+    puzzle[:, 0] = 5
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    out = model(puzzle, solution, mask)
+    assert 'g' not in out
+    assert out['gauge_kinetic_loss'].item() == 0.0
+    # λ_g must not affect loss when there is no gauge channel.
+    expected = out['task_loss'] + 0.5 * out['kinetic_loss']
+    assert torch.allclose(out['loss'], expected, atol=1e-5)
+    assert (out['s'] >= 0).all()
+    assert torch.allclose(out['s'].norm(dim=-1), torch.ones(2, 81), atol=1e-4)
+    out['loss'].backward()
+    grads = [p.grad.abs().sum().item() for p in model.parameters() if p.grad is not None]
+    assert sum(grads) > 0.0
+
+
 def test_resolve_mixer_ckpt_cli_roundtrip(tmp_path: Path) -> None:
     """Train/eval resume: ckpt mixer wins when CLI omits --mixer; CLI overrides."""
+    from riemannian_sudoku.train import _resolve_use_gauge
+
     assert _resolve_mixer(None) == 'euclid_axial'
     assert _resolve_mixer(None, {}) == 'euclid_axial'
     assert _resolve_mixer(None, {'mixer': 'cross_coupled'}) == 'cross_coupled'
     assert _resolve_mixer('euclid_axial', {'mixer': 'cross_coupled'}) == 'euclid_axial'
     assert _resolve_mixer('cross_coupled', {'mixer': 'euclid_axial'}) == 'cross_coupled'
+    assert _resolve_use_gauge(False) is True
+    assert _resolve_use_gauge(True) is False
+    assert _resolve_use_gauge(False, {'use_gauge': False}) is False
+    assert _resolve_use_gauge(True, {'use_gauge': True}) is False  # CLI --no-gauge wins
 
     # Smoke: build from ckpt-resolved mixer and load_state_dict (the resume path).
     src = RiemannianSudokuSolver(mixer='cross_coupled', num_steps=2)
     ckpt_path = tmp_path / 'cc.pt'
-    torch.save({'model': src.state_dict(), 'args': {'mixer': 'cross_coupled'}}, ckpt_path)
+    torch.save({'model': src.state_dict(), 'args': {'mixer': 'cross_coupled', 'use_gauge': True}}, ckpt_path)
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     mixer = _resolve_mixer(None, ckpt.get('args') or {})
-    dst = RiemannianSudokuSolver(mixer=mixer, num_steps=2)
+    use_gauge = _resolve_use_gauge(False, ckpt.get('args') or {})
+    dst = RiemannianSudokuSolver(mixer=mixer, num_steps=2, use_gauge=use_gauge)
     dst.load_state_dict(ckpt['model'])  # must not raise Missing/Unexpected key
     assert dst.mixer == 'cross_coupled'
+    assert dst.use_gauge is True
 
 
 def test_unknown_mixer_raises() -> None:

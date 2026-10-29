@@ -39,6 +39,15 @@ def _resolve_mixer(cli_mixer: str | None, ckpt_args: dict | None = None) -> str:
     return 'euclid_axial'
 
 
+def _resolve_use_gauge(cli_no_gauge: bool, ckpt_args: dict | None = None) -> bool:
+    """``--no-gauge`` wins; else ckpt ``args.use_gauge``; else True (live T² on)."""
+    if cli_no_gauge:
+        return False
+    if ckpt_args is not None and 'use_gauge' in ckpt_args:
+        return bool(ckpt_args['use_gauge'])
+    return True
+
+
 def _blank_and_exact(
     pred: torch.Tensor,
     solution: torch.Tensor,
@@ -140,6 +149,7 @@ def _save_ckpt(
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
+                'use_gauge': args.use_gauge,
             },
         },
         path,
@@ -197,6 +207,7 @@ def train_cmd(args: argparse.Namespace) -> None:
 
     ckpt_args = (resume_ckpt.get('args') or {}) if resume_ckpt is not None else None
     args.mixer = _resolve_mixer(args.mixer, ckpt_args)
+    args.use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
 
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
@@ -208,6 +219,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
         mixer=args.mixer,
+        use_gauge=args.use_gauge,
     ).to(device)
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
@@ -284,6 +296,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
+                'use_gauge': args.use_gauge,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -507,6 +520,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'MAX_VRAM_GB={max_vram_gb:.3f}')
     print(f'COMPILE={int(args.compile)}')
     print(f'MIXER={args.mixer}')
+    print(f'USE_GAUGE={int(args.use_gauge)}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -515,13 +529,16 @@ def eval_cmd(args: argparse.Namespace) -> None:
     """Evaluate a checkpoint on HF test (or train-head holdout)."""
     device = _resolve_device()
     ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt.get('args') or {})
+    ckpt_args = ckpt.get('args') or {}
+    mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt_args)
+    use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
         mixer=mixer,
+        use_gauge=use_gauge,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -607,6 +624,11 @@ def main() -> None:
         help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
     )
     t.add_argument(
+        '--no-gauge',
+        action='store_true',
+        help='cross_coupled cells-only ablation: 729→MLP→729, no live T² (default: with gauge)',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -641,6 +663,11 @@ def main() -> None:
         default=None,
         choices=['euclid_axial', 'cross_coupled'],
         help='override mixer; default reads ckpt args',
+    )
+    e.add_argument(
+        '--no-gauge',
+        action='store_true',
+        help='force cells-only cross_coupled; default reads ckpt args',
     )
 
     args = parser.parse_args()

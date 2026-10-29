@@ -83,6 +83,9 @@ class RiemannianSudokuSolver(nn.Module):
 
     ``cross_coupled``: concat flatten(s)+flatten(g) → MLP → per-manifold tangent
     project → parallel Exp (cell orthant + circle Exp on each S¹ gauge factor).
+
+    ``use_gauge=False`` (``--no-gauge``): cells-only ablation — flatten(s) → MLP →
+    cell tangent only (729→MLP→729); no live T² state / dynamics / λ_g.
     """
 
     def __init__(
@@ -96,11 +99,14 @@ class RiemannianSudokuSolver(nn.Module):
         constraint_weight: float = 0.1,
         supervise_all_steps: bool = False,
         mixer: str = 'euclid_axial',
+        use_gauge: bool = True,
     ) -> None:
         super().__init__()
         if mixer not in ('euclid_axial', 'cross_coupled'):
             raise ValueError(f'unknown mixer {mixer!r}; expected euclid_axial|cross_coupled')
         self.mixer = mixer
+        # Gauge only exists on the cross_coupled path; axial ignores the flag.
+        self.use_gauge = bool(use_gauge) and mixer == 'cross_coupled'
         self.d_model = d_model
         self.num_steps = num_steps
         self.dt = dt
@@ -125,12 +131,15 @@ class RiemannianSudokuSolver(nn.Module):
             self.proj = None
             self.axial = None
             self.velocity = None
+            # With gauge: 765→512→512→765; --no-gauge: 729→512→512→729 (cells only).
+            in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
+            out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S
             self.cross_mlp = nn.Sequential(
-                nn.Linear(_CROSS_IN, _CROSS_H),
+                nn.Linear(in_dim, _CROSS_H),
                 nn.GELU(),
                 nn.Linear(_CROSS_H, _CROSS_H),
                 nn.GELU(),
-                nn.Linear(_CROSS_H, _CROSS_S + _CROSS_G),
+                nn.Linear(_CROSS_H, out_dim),
             )
 
     def _velocity_at(self, s: Tensor) -> Tensor:
@@ -140,10 +149,14 @@ class RiemannianSudokuSolver(nn.Module):
         h = self.axial(h)
         return self.velocity(h)
 
-    def _cross_velocities(self, s: Tensor, g: Tensor) -> tuple[Tensor, Tensor]:
-        """Shared MLP → ambient (v_s, v_g); caller projects to each tangent."""
+    def _cross_velocities(self, s: Tensor, g: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
+        """Shared MLP → ambient (v_s[, v_g]); caller projects to each tangent."""
         assert self.cross_mlp is not None
         b = s.shape[0]
+        if not self.use_gauge:
+            v_s = self.cross_mlp(s.reshape(b, _CROSS_S)).reshape(b, 81, 9)
+            return v_s, None
+        assert g is not None
         x = torch.cat([s.reshape(b, _CROSS_S), g.reshape(b, _CROSS_G)], dim=-1)
         out = self.cross_mlp(x)
         v_s = out[:, :_CROSS_S].reshape(b, 81, 9)
@@ -183,22 +196,25 @@ class RiemannianSudokuSolver(nn.Module):
 
     def _integrate_cross_coupled(
         self, puzzle: Tensor
-    ) -> tuple[Tensor, list[Tensor], list[Tensor], Tensor]:
-        """Parallel Exp on cell spheres + live T² gauge circles."""
+    ) -> tuple[Tensor, list[Tensor], list[Tensor], Tensor | None]:
+        """Parallel Exp on cell spheres; live T² gauge when ``use_gauge`` else cells-only."""
         s, blank_mask = init_sphere_state(puzzle)
-        g = init_t2_gauge(s.shape[0], device=s.device, dtype=s.dtype)
+        g: Tensor | None = (
+            init_t2_gauge(s.shape[0], device=s.device, dtype=s.dtype) if self.use_gauge else None
+        )
         velocities: list[Tensor] = []
         gauge_velocities: list[Tensor] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
             v_s, v_g = self._cross_velocities(s, g)
             v_s = project_tangent(s, v_s)
-            v_g = project_tangent(g, v_g)
-            v_s = v_s * blank_mask.unsqueeze(-1)  # gauge always free
+            v_s = v_s * blank_mask.unsqueeze(-1)  # gauge always free when present
             velocities.append(v_s)
-            gauge_velocities.append(v_g)
             s = riemannian_exp_map_orthant(s, v_s, dt=self.dt)
-            g = riemannian_exp_map(g, v_g, dt=self.dt)  # S¹ Exp; no orthant
+            if g is not None and v_g is not None:
+                v_g = project_tangent(g, v_g)
+                gauge_velocities.append(v_g)
+                g = riemannian_exp_map(g, v_g, dt=self.dt)  # S¹ Exp; no orthant
             clues = blank_mask == 0
             digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
             s_clue = torch.zeros_like(s)
@@ -207,7 +223,7 @@ class RiemannianSudokuSolver(nn.Module):
             states.append(s)
         # Stash for diagnostics + optional gauge kinetic (λ_g via forward).
         self._last_gauge = g
-        self._last_gauge_velocities = gauge_velocities
+        self._last_gauge_velocities = gauge_velocities if self.use_gauge else None
         return s, velocities, states, g
 
     @staticmethod
