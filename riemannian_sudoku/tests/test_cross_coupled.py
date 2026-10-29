@@ -203,3 +203,58 @@ def test_unknown_mixer_raises() -> None:
         assert 'nope' in str(e)
     else:
         raise AssertionError('expected ValueError')
+
+
+def test_cross_mlp_silu_same_params_as_gelu() -> None:
+    """``--mlp-activation silu``: same Linear shapes / param count as default GELU."""
+    gelu = _cc_model(use_gauge=False, mlp_activation='gelu')
+    silu = _cc_model(use_gauge=False, mlp_activation='silu')
+    assert gelu.mlp_activation == 'gelu'
+    assert silu.mlp_activation == 'silu'
+    n_g = sum(p.numel() for p in gelu.parameters() if p.requires_grad)
+    n_s = sum(p.numel() for p in silu.parameters() if p.requires_grad)
+    assert n_g == n_s == 1_010_393
+    assert isinstance(silu.cross_mlp[1], nn.SiLU)
+    assert isinstance(silu.cross_mlp[3], nn.SiLU)
+
+
+def test_cross_mlp_swiglu_fair_params_and_forward() -> None:
+    """SwiGLU mid-block ≈ GELU param count; trains and stays on the cell sphere."""
+    from riemannian_sudoku.model import _SwiGLU
+
+    torch.manual_seed(5)
+    gelu = _cc_model(use_gauge=False, mlp_activation='gelu')
+    swig = _cc_model(use_gauge=False, mlp_activation='swiglu', kinetic_weight=0.5, constraint_weight=0.0)
+    n_g = sum(p.numel() for p in gelu.parameters() if p.requires_grad)
+    n_w = sum(p.numel() for p in swig.parameters() if p.requires_grad)
+    # Fair-ish: within 0.1% of GELU (h≈170 mid width).
+    assert abs(n_w - n_g) / n_g < 0.001, f'swiglu={n_w} gelu={n_g}'
+    assert isinstance(swig.cross_mlp[1], _SwiGLU)
+    puzzle = torch.randint(0, 10, (2, 81))
+    puzzle[:, 0] = 2
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    out = swig(puzzle, solution, mask)
+    assert torch.isfinite(out['loss'])
+    assert 'g' not in out
+    assert (out['s'] >= 0).all()
+    out['loss'].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in swig.parameters())
+
+
+def test_resolve_mlp_activation() -> None:
+    from riemannian_sudoku.train import _resolve_mlp_activation
+
+    assert _resolve_mlp_activation(None) == 'gelu'
+    assert _resolve_mlp_activation(None, {}) == 'gelu'
+    assert _resolve_mlp_activation(None, {'mlp_activation': 'silu'}) == 'silu'
+    assert _resolve_mlp_activation('swiglu', {'mlp_activation': 'silu'}) == 'swiglu'
+
+
+def test_unknown_mlp_activation_raises() -> None:
+    try:
+        RiemannianSudokuSolver(mixer='cross_coupled', mlp_activation='relu')
+    except ValueError as e:
+        assert 'relu' in str(e)
+    else:
+        raise AssertionError('expected ValueError')

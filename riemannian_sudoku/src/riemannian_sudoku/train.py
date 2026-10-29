@@ -48,6 +48,15 @@ def _resolve_use_gauge(cli_no_gauge: bool, ckpt_args: dict | None = None) -> boo
     return True
 
 
+def _resolve_mlp_activation(cli_act: str | None, ckpt_args: dict | None = None) -> str:
+    """CLI ``--mlp-activation`` wins; else ckpt; else ``gelu`` (cross MLP default)."""
+    if cli_act:
+        return cli_act
+    if ckpt_args is not None and 'mlp_activation' in ckpt_args:
+        return str(ckpt_args['mlp_activation'])
+    return 'gelu'
+
+
 def _blank_and_exact(
     pred: torch.Tensor,
     solution: torch.Tensor,
@@ -150,6 +159,7 @@ def _save_ckpt(
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
+                'mlp_activation': args.mlp_activation,
             },
         },
         path,
@@ -208,6 +218,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     ckpt_args = (resume_ckpt.get('args') or {}) if resume_ckpt is not None else None
     args.mixer = _resolve_mixer(args.mixer, ckpt_args)
     args.use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
+    args.mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
 
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
@@ -220,6 +231,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         supervise_all_steps=args.supervise_all_steps,
         mixer=args.mixer,
         use_gauge=args.use_gauge,
+        mlp_activation=args.mlp_activation,
     ).to(device)
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
@@ -297,6 +309,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
+                'mlp_activation': args.mlp_activation,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -521,6 +534,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'COMPILE={int(args.compile)}')
     print(f'MIXER={args.mixer}')
     print(f'USE_GAUGE={int(args.use_gauge)}')
+    print(f'MLP_ACTIVATION={args.mlp_activation}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -532,6 +546,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
     ckpt_args = ckpt.get('args') or {}
     mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt_args)
     use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
+    mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -539,6 +554,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
         dt=args.dt,
         mixer=mixer,
         use_gauge=use_gauge,
+        mlp_activation=mlp_activation,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -629,6 +645,13 @@ def main() -> None:
         help='cross_coupled cells-only ablation: 729→MLP→729, no live T² (default: with gauge)',
     )
     t.add_argument(
+        '--mlp-activation',
+        type=str,
+        default=None,
+        choices=['gelu', 'silu', 'swiglu'],
+        help='cross_coupled ambient MLP nonlinearity (default gelu; axial unchanged; on --resume reads ckpt)',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -668,6 +691,13 @@ def main() -> None:
         '--no-gauge',
         action='store_true',
         help='force cells-only cross_coupled; default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-activation',
+        type=str,
+        default=None,
+        choices=['gelu', 'silu', 'swiglu'],
+        help='override cross MLP activation; default reads ckpt args',
     )
 
     args = parser.parse_args()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from riemannian_sudoku.axial import SudokuAxialAttention
@@ -21,6 +22,43 @@ _CROSS_IN = 81 * 9 + 18 * 2  # 765
 _CROSS_S = 81 * 9  # 729
 _CROSS_G = 18 * 2  # 36
 _CROSS_H = 512
+_MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
+
+
+class _SwiGLU(nn.Module):
+    """``W3(silu(W_gate(x)) * W_up(x))``; hidden ≈ ``dim/3`` so Linear+this+Linear ≈ 3-layer GELU width."""
+
+    def __init__(self, dim: int, hidden: int | None = None) -> None:
+        super().__init__()
+        # Match Linear(dim,dim) params: dim²+dim ≈ 3·dim·h + 2h + dim → h ≈ dim²/(3dim+2).
+        h = hidden if hidden is not None else max(1, (dim * dim) // (3 * dim + 2))
+        self.w12 = nn.Linear(dim, 2 * h)
+        self.w3 = nn.Linear(h, dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        a, b = self.w12(x).chunk(2, dim=-1)
+        return self.w3(F.silu(a) * b)
+
+
+def _cross_mlp(in_dim: int, out_dim: int, hidden: int, activation: str) -> nn.Module:
+    """Build cross_coupled ambient MLP; ``activation`` ∈ gelu|silu|swiglu."""
+    if activation not in _MLP_ACTIVATIONS:
+        raise ValueError(f'unknown mlp_activation {activation!r}; expected gelu|silu|swiglu')
+    if activation == 'swiglu':
+        # Linear → SwiGLU (fair mid width) → Linear; silu gate lives inside SwiGLU.
+        return nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            _SwiGLU(hidden),
+            nn.Linear(hidden, out_dim),
+        )
+    act: nn.Module = nn.GELU() if activation == 'gelu' else nn.SiLU()
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden),
+        act,
+        nn.Linear(hidden, hidden),
+        type(act)(),  # fresh instance (parameter-free; keeps Sequential tidy)
+        nn.Linear(hidden, out_dim),
+    )
 
 
 def _torus_t3_pe() -> Tensor:
@@ -100,13 +138,18 @@ class RiemannianSudokuSolver(nn.Module):
         supervise_all_steps: bool = False,
         mixer: str = 'euclid_axial',
         use_gauge: bool = True,
+        mlp_activation: str = 'gelu',
     ) -> None:
         super().__init__()
         if mixer not in ('euclid_axial', 'cross_coupled'):
             raise ValueError(f'unknown mixer {mixer!r}; expected euclid_axial|cross_coupled')
+        if mlp_activation not in _MLP_ACTIVATIONS:
+            raise ValueError(f'unknown mlp_activation {mlp_activation!r}; expected gelu|silu|swiglu')
         self.mixer = mixer
         # Gauge only exists on the cross_coupled path; axial ignores the flag.
         self.use_gauge = bool(use_gauge) and mixer == 'cross_coupled'
+        # Axial velocity MLP stays GELU; flag only selects cross_coupled ambient MLP.
+        self.mlp_activation = mlp_activation if mixer == 'cross_coupled' else 'gelu'
         self.d_model = d_model
         self.num_steps = num_steps
         self.dt = dt
@@ -131,16 +174,11 @@ class RiemannianSudokuSolver(nn.Module):
             self.proj = None
             self.axial = None
             self.velocity = None
-            # With gauge: 765→512→512→765; --no-gauge: 729→512→512→729 (cells only).
+            # With gauge: 765→512→…→765; --no-gauge: 729→512→…→729 (cells only).
+            # gelu/silu: 512→512 mid Linear; swiglu: mid SwiGLU with h≈170 (fair params).
             in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
             out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S
-            self.cross_mlp = nn.Sequential(
-                nn.Linear(in_dim, _CROSS_H),
-                nn.GELU(),
-                nn.Linear(_CROSS_H, _CROSS_H),
-                nn.GELU(),
-                nn.Linear(_CROSS_H, out_dim),
-            )
+            self.cross_mlp = _cross_mlp(in_dim, out_dim, _CROSS_H, self.mlp_activation)
 
     def _velocity_at(self, s: Tensor) -> Tensor:
         assert self.proj is not None and self.axial is not None and self.velocity is not None
