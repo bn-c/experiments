@@ -44,7 +44,7 @@ class BipartiteSnTmSolver(nn.Module):
         d: int = D,
         m: int = M,
         h_y: int = 320,
-        h_x: int = 432,
+        h_x: int = 424,
         pe_alpha: float = PE_ALPHA,
         omega_weight: float = LAMBDA_OMEGA_DEFAULT,
         ce_gamma: float = CE_GAMMA,
@@ -100,7 +100,9 @@ class BipartiteSnTmSolver(nn.Module):
             omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
             omegas.append(omega)
             y = torus_step(y, omega)
-            u = self.vf.ambient_u(x, y, self.pe, self.cell_house_idx)
+            u = self.vf.ambient_u(
+                x, y, self.pe, self.cell_house_idx, self.poles, self.house_cell_idx
+            )
             x = geodesic_step(x, u, x0, is_clue)
             states.append(x)
         self._last_omegas = omegas

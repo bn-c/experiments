@@ -24,8 +24,8 @@ class CoupledVectorField(nn.Module):
     Leapfrog pair: house ω from cell aggregates + Clifford ``y_emb``, then cell
     ambient u from FiLM(cell+PE, house embeds) → mid×2 → out.
 
-    A2 P2 widths ~681k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
-    ``M=16``, ``in_y=178``.
+    A2 cavity widths ~688k: ``H_Y=320`` (1 mid), ``H_X=424`` (FiLM + 2 mid);
+    ``M=16``, ``in_y=178``; house_in = Clifford×3 + q_cavity (123).
     """
 
     def __init__(
@@ -33,7 +33,7 @@ class CoupledVectorField(nn.Module):
         d: int = D,
         m: int = M,
         h_y: int = 320,
-        h_x: int = 432,
+        h_x: int = 424,
         pe_dim: int = PE_DIM,
     ) -> None:
         super().__init__()
@@ -44,10 +44,11 @@ class CoupledVectorField(nn.Module):
         # mean+std (2d) + sum q + sum q² (2·9) + y_emb (2m)
         in_y = 2 * d + 2 * N_DIGITS + emb_m
         self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
-        # FiLM first block: cell(+PE) + house shift/gate → H_X; then mid×2 + out.
+        # FiLM first block: cell(+PE) + house(shift/gate with cavity) → H_X; mid×2 + out.
+        house_in_dim = 3 * emb_m + 3 * N_DIGITS  # 96 + 27 = 123
         self.x_in_cell = nn.Linear(d + pe_dim, h_x)
-        self.x_in_house_shift = nn.Linear(3 * emb_m, h_x)
-        self.x_in_house_gate = nn.Linear(3 * emb_m, h_x)
+        self.x_in_house_shift = nn.Linear(house_in_dim, h_x)
+        self.x_in_house_gate = nn.Linear(house_in_dim, h_x)
         self.vf_x_body = nn.Sequential(
             nn.Linear(h_x, h_x),
             nn.SiLU(),
@@ -100,17 +101,28 @@ class CoupledVectorField(nn.Module):
         y: Tensor,
         pe: Tensor,
         cell_house_idx: Tensor,
+        poles: Tensor,
+        house_cell_idx: Tensor,
     ) -> Tensor:
         """
-        Cell ambient velocity ``(B, 81, D)`` via FiLM(cell+PE, house embeds).
+        Cell ambient velocity ``(B, 81, D)`` via FiLM(cell+PE, house+cavity).
 
-        Clifford house embeds gathered with static ``CELL_HOUSE_IDX[81, 3]``.
+        ``house_in = [y_rcb ‖ q_cavity]`` (123-D): Clifford embeds of the three
+        incident houses plus leave-one-out claim sums (other 8 cells / house).
         """
+        B = x.shape[0]
         y_emb = clifford_embed(y)  # (B, 27, 2M)
         emb_m = 2 * self.m
-        house_in = y_emb[:, cell_house_idx].reshape(x.shape[0], 81, 3 * emb_m)
-        pe_b = pe.unsqueeze(0).expand(x.shape[0], -1, -1)
-        cell_in = torch.cat([x, pe_b], dim=-1)  # (B, 81, D+PE_DIM)
+        y_rcb = y_emb[:, cell_house_idx].reshape(B, 81, 3 * emb_m)
+        # Leave-one-out cavity claims (same q recipe as house_features / _logits).
+        x_dig = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
+        q = F.relu(x_dig @ poles[:, :N_DIGITS].T)  # (B, 81, 9)
+        q_house = q[:, house_cell_idx].sum(dim=2)  # (B, 27, 9)
+        q_other = q_house[:, cell_house_idx] - q.unsqueeze(2)  # (B, 81, 3, 9)
+        q_cavity = q_other.reshape(B, 81, 3 * N_DIGITS)  # (B, 81, 27)
+        house_in = torch.cat([y_rcb, q_cavity], dim=-1)  # (B, 81, 123)
+        pe_b = pe.unsqueeze(0).expand(B, -1, -1)
+        cell_in = torch.cat([x, pe_b], dim=-1)  # (B, 81, D+PE_DIM) = 70
         base = F.silu(self.x_in_cell(cell_in) + self.x_in_house_shift(house_in))
         gate = 1.0 + torch.tanh(self.x_in_house_gate(house_in))
         return self.vf_x_body(base * gate)
