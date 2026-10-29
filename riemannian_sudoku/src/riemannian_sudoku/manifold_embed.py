@@ -106,11 +106,11 @@ def init_bipartite_state(
     pe_alpha: float = PE_ALPHA,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Lift puzzle digits onto ``S^{D-1}`` and zero-init house angles on ``T^M``.
+    Lift puzzle digits onto ``S^{D-1}`` and init house angles at ``π/4`` on ``T^M``.
 
     Clues ← ETF pole for digit; blanks ← North Pole + ``α·PE`` into scratch, then
     normalize. Returns ``(x, y, is_clue)`` with shapes ``(B,81,D)``, ``(B,27,M)``,
-    ``(B,81)`` bool.
+    ``(B,81)`` bool. ``y`` is a plain tensor (not ``nn.Parameter``).
     """
     b = puzzle.shape[0]
     device = puzzle.device
@@ -132,5 +132,6 @@ def init_bipartite_state(
     x = torch.cat([x[..., :SCRATCH_START], scratch], dim=-1)
     x = F.normalize(x, dim=-1, eps=1e-6)
 
-    y = torch.zeros(b, 27, M, device=device, dtype=dtype)
+    # π/4 unlocks Clifford Jacobian at k=1 (cos=sin); not a Parameter.
+    y = torch.full((b, 27, M), math.pi / 4, device=device, dtype=dtype)
     return x, y, is_clue

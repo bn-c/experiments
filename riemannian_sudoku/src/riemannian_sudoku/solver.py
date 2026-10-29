@@ -24,7 +24,7 @@ from riemannian_sudoku.manifold_embed import (
 )
 
 K_DEFAULT = 8
-LOGIT_SCALE_INIT = 12.0
+LOGIT_SCALE_INIT = 4.0
 LOGIT_SCALE_MAX = 50.0
 CE_GAMMA = 0.9  # → label_smoothing = 1 - γ
 LAMBDA_OMEGA_DEFAULT = 0.0
@@ -35,7 +35,7 @@ class BipartiteSnTmSolver(nn.Module):
     Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps.
 
     Readout: ``normalize(x[..., :9])``; ``logits = logit_scale · (x_dec @ P[:, :9].T)``
-    with ``logit_scale`` init 12, clamp ≤50. Train CE with γ=0.9; ``λ_ω=0`` (log only).
+    with ``logit_scale`` init 4, clamp ≤50. Train CE with γ=0.9; ``λ_ω=0`` (log only).
     """
 
     def __init__(
@@ -139,10 +139,9 @@ class BipartiteSnTmSolver(nn.Module):
         omega_k = omegas[-1]
         scratch_energy = x[..., SCRATCH_START:].square().mean()
         blank_np = x[..., BLANK_COORD].square().mean()
-        # Watch-only: cell-level claim energy (same slice-norm as house_features / _logits).
+        # Watch-only: unnormalized claims (matches house_features; not slice-normed like _logits).
         p9 = self.poles[:, :N_DIGITS]
-        x9 = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
-        q = F.relu(x9 @ p9.T)
+        q = F.relu(x[..., :N_DIGITS] @ p9.T)
         claim_energy = q.square().mean()
 
         out: dict[str, Tensor] = {
