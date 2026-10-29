@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from riemannian_sudoku.manifold_embed import D, M, N_DIGITS, PE_DIM
+from riemannian_sudoku.manifold_embed import D, M, N_DIGITS, PE_DIM, clifford_embed
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
@@ -21,10 +21,11 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
 
 class CoupledVectorField(nn.Module):
     """
-    Leapfrog pair: house ω from cell aggregates, then cell ambient u from
-    ``[x, y_r, y_c, y_b, pe]``.
+    Leapfrog pair: house ω from cell aggregates + Clifford ``y_emb``, then cell
+    ambient u from ``[x, y_emb_r, y_emb_c, y_emb_b, pe]``.
 
-    Widths target ~0.66M: ``H_Y=320`` (1 mid), ``H_X=448`` (2 mid).
+    A2 widths ~671k: ``H_Y=320`` (1 mid), ``H_X=448`` (2 mid); ``M=16``,
+    ``in_y=178``, ``in_x=166``.
     """
 
     def __init__(
@@ -39,10 +40,10 @@ class CoupledVectorField(nn.Module):
         self.d = d
         self.m = m
         self.pe_dim = pe_dim
-        # mean+std of cell feats (2d) + sum q + sum q² (2·9)
-        in_y = 2 * d + 2 * N_DIGITS
-        in_x = d + 3 * m + pe_dim
-        # X needs 2 mid Linear(H,H) to land ~0.66M with Y's 1 mid.
+        emb_m = 2 * m  # Clifford cat(cos,sin)
+        # mean+std (2d) + sum q + sum q² (2·9) + y_emb (2m)
+        in_y = 2 * d + 2 * N_DIGITS + emb_m
+        in_x = d + 3 * emb_m + pe_dim
         self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
         self.vf_x = _mlp(in_x, h_x, d, n_mid=2)
 
@@ -56,12 +57,13 @@ class CoupledVectorField(nn.Module):
         Per-house ``(B, 27, 2D+18)``: mean+std of cell ``x`` + claim sums.
 
         ``q = relu(x_{:9} P_{:9}^T)``; both ``∑q`` and ``∑q²`` over the 9 cells.
-        Static gather via ``HOUSE_CELL_IDX`` (no dynamic bool index).
+        ``std = (var + 1e-6).sqrt()``. Static gather via ``HOUSE_CELL_IDX``.
         """
         # x_cells: (B, 27, 9, D)
         x_h = x[:, house_cell_idx]
         mean = x_h.mean(dim=2)
-        std = x_h.std(dim=2, unbiased=False)
+        var = x_h.var(dim=2, unbiased=False)
+        std = (var + 1e-6).sqrt()
         p9 = poles[:, :N_DIGITS]  # (9, 9)
         q = F.relu(x[..., :N_DIGITS] @ p9.T)  # (B, 81, 9)
         q_h = q[:, house_cell_idx]  # (B, 27, 9, 9)
@@ -72,12 +74,14 @@ class CoupledVectorField(nn.Module):
     def omega(
         self,
         x: Tensor,
+        y: Tensor,
         poles: Tensor,
         house_cell_idx: Tensor,
     ) -> Tensor:
-        """House angular velocity ``(B, 27, M)``."""
+        """House angular velocity ``(B, 27, M)`` from ``[house_feats(x), y_emb]``."""
         feat = self.house_features(x, poles, house_cell_idx)
-        return self.vf_y(feat)
+        y_emb = clifford_embed(y)
+        return self.vf_y(torch.cat([feat, y_emb], dim=-1))
 
     def ambient_u(
         self,
@@ -87,12 +91,13 @@ class CoupledVectorField(nn.Module):
         cell_house_idx: Tensor,
     ) -> Tensor:
         """
-        Cell ambient velocity ``(B, 81, D)`` from ``[x, y_r, y_c, y_b, pe]``.
+        Cell ambient velocity ``(B, 81, D)`` from ``[x, y_emb_r/c/b, pe]``.
 
-        House angles gathered with static ``CELL_HOUSE_IDX[81, 3]``.
+        Clifford house embeds gathered with static ``CELL_HOUSE_IDX[81, 3]``.
         """
-        # y_cell: (B, 81, 3, M) → flat (B, 81, 3M)
-        y_c = y[:, cell_house_idx].reshape(x.shape[0], 81, 3 * self.m)
+        y_emb = clifford_embed(y)  # (B, 27, 2M)
+        emb_m = 2 * self.m
+        y_c = y_emb[:, cell_house_idx].reshape(x.shape[0], 81, 3 * emb_m)
         pe_b = pe.unsqueeze(0).expand(x.shape[0], -1, -1)
         inp = torch.cat([x, y_c, pe_b], dim=-1)
         return self.vf_x(inp)

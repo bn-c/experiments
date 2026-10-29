@@ -1,4 +1,4 @@
-"""Bipartite ``S^{63} ↔ T^{32}`` Sudoku solver (leapfrog Y→X, K steps)."""
+"""Bipartite ``S^{63} ↔ T^{16}`` Sudoku solver (leapfrog Y→X, K steps)."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ class BipartiteSnTmSolver(nn.Module):
         omegas: list[Tensor] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
-            omega = self.vf.omega(x, self.poles, self.house_cell_idx)
+            omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
             omegas.append(omega)
             y = torus_step(y, omega)
             u = self.vf.ambient_u(x, y, self.pe, self.cell_house_idx)

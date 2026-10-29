@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 10k cooled cosine: bipartite S^{63}↔T^{32} (λ_ω=0, compile on) vs geo G blank@10k=0.512.
+# 10k cooled cosine: bipartite A2 S^{63}↔T^{16} (λ_ω=0, compile on) vs geo G blank@10k=0.512.
 # Recipe: CE γ=0.9, batch 128, lr≈1.414e-4, T_max=10k, seed 42, val 2048, K=8.
+# Prior Bi blank 0.542 (M=32 raw-y) is geometry-buggy / invalid for comparison.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
@@ -16,16 +17,17 @@ EVAL_EVERY="${EVAL_EVERY:-500}"
 SEED="${SEED:-42}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
-mkdir -p logs checkpoints/bipartite-sn-tm-10k
-SUMMARY="logs/bipartite-sn-tm-10k-summary.txt"
-NAME="bipartite-sn-tm-lk0-b${BATCH}-s${STEPS}"
-CKPT="checkpoints/bipartite-sn-tm-10k/${NAME}"
+mkdir -p logs checkpoints/bipartite-sn-tm-a2-10k
+SUMMARY="logs/bipartite-sn-tm-a2-10k-summary.txt"
+NAME="bipartite-sn-tm-a2-lk0-b${BATCH}-s${STEPS}"
+CKPT="checkpoints/bipartite-sn-tm-a2-10k/${NAME}"
 LOG="logs/${NAME}.log"
 mkdir -p "$CKPT"
 
 {
   echo "BASELINE_G=geo_transformer blank@10k=0.512 n_params=501257 run=6rp4e5u4"
-  echo "ARM=bipartite_sn_tm H_Y=320 H_X=448 D=64 M=32 K=${NUM_STEPS} LAMBDA_OMEGA=0 COMPILE=1"
+  echo "PRIOR_BI_INVALID=blank@10k=0.542 geometry-buggy M=32 raw-y"
+  echo "ARM=bipartite_sn_tm_A2 H_Y=320 H_X=448 D=64 M=16 CliffordETF K=${NUM_STEPS} LAMBDA_OMEGA=0 COMPILE=1"
   echo "CE_GAMMA=0.9 BATCH=${BATCH} LR=${LR} SEED=${SEED} VAL=${VAL_SIZE}"
   echo "----"
 } | tee "$SUMMARY"

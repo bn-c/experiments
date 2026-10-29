@@ -1,4 +1,4 @@
-"""Bipartite S^{63} cell + T^{32} house embeddings (ETF poles, PE, static gathers)."""
+"""Bipartite S^{63} cell + T^{16} house embeddings (Householder ETF, Clifford, PE)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 D = 64
-M = 32
+M = 16
 N_DIGITS = 9
 BLANK_COORD = 8  # North-pole blank index in coords 0..8
 SCRATCH_START = 9
@@ -19,17 +19,38 @@ PE_DIM = 6  # Clifford T^3 (row/col/box circles)
 
 def simplex_etf_poles(n: int = N_DIGITS, d: int = D) -> Tensor:
     """
-    ``n`` digit poles as a simplex ETF, living in coords ``0..n-1`` of ``R^d``.
+    ``n`` digit poles as a simplex ETF in ``R^d``, Householder-rotated so
+    ``poles[:, blank]==0`` (orthogonal to North-pole ``e_8``).
 
-    Rows of ``(I - 11ᵀ/n)`` are centered then L2-normalized; scratch dims are 0.
-    Shape ``(n, d)``.
+    Build centered simplex rows, L2-normalize, apply Householder ``H`` mapping
+    unit all-ones ``1/√n`` → ``e_{blank}``, then embed into ``R^d``. Shape ``(n, d)``.
     """
     eye = torch.eye(n)
     centered = eye - torch.ones(n, n) / float(n)
-    poles = F.normalize(centered, dim=-1, eps=1e-6)
+    poles9 = F.normalize(centered, dim=-1, eps=1e-6)
+
+    # H: n_hat = 1/√n ↦ e_blank (plan: 1/3 for n=9).
+    n_hat = torch.ones(n) / math.sqrt(float(n))
+    e_blank = torch.zeros(n)
+    e_blank[BLANK_COORD] = 1.0
+    v = n_hat - e_blank
+    H = torch.eye(n) - 2.0 * torch.outer(v, v) / (v @ v)
+    poles9 = (H @ poles9.T).T
+
     p = torch.zeros(n, d)
-    p[:, :n] = poles
+    p[:, :n] = poles9
+    if p[:, BLANK_COORD].abs().max() >= 1e-6:
+        raise RuntimeError('Householder ETF: poles[:, blank] not ~0')
     return p
+
+
+def clifford_embed(y: Tensor) -> Tensor:
+    """
+    Clifford torus lift: unwrapped angles ``(..., M)`` → unit embed ``(..., 2M)``.
+
+    ``cat([cos(y), sin(y)], -1) * M^{-1/2}``; ``‖y_emb‖₂ ≡ 1``.
+    """
+    return torch.cat([torch.cos(y), torch.sin(y)], dim=-1) * (M**-0.5)
 
 
 def torus_t3_pe(pe_dim: int = PE_DIM) -> Tensor:
