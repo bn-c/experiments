@@ -11,6 +11,7 @@ from riemannian_sudoku.manifold_embed import (
     D,
     M,
     N_DIGITS,
+    SCRATCH_START,
     cell_house_idx,
     clifford_embed,
     house_cell_idx,
@@ -159,5 +160,21 @@ def test_logit_scale_clamp() -> None:
         model.logit_scale.fill_(100.0)
     puzzle = torch.zeros(1, 81, dtype=torch.long)
     logits = model(puzzle)['logits']
-    # scale clamped to 50; cosine ≤1 → |logit| ≤ 50
+    # scale clamped to 50; on S^{63}, ||x[...,:9]||≤1 and ||P[:,:9]||=1 → |logit| ≤ 50
     assert logits.abs().max() <= 50.0 + 1e-4
+
+
+def test_logits_unnormalized_matches_raw_dot() -> None:
+    """A2 unnorm: _logits is scale · (x[...,:9] @ P[:,:9].T), no slice-norm."""
+    model = BipartiteSnTmSolver(num_steps=1)
+    # Pole + scratch mass: ||x[...,:9]|| ≪ 1 while ||x||=1 (NP is inside [:9]).
+    raw_x = 0.3 * model.poles[0].clone()
+    raw_x[SCRATCH_START] = 0.7
+    x = F.normalize(raw_x, dim=-1).view(1, 1, -1).expand(1, 81, -1)
+    assert float(x[..., :N_DIGITS].norm(dim=-1).mean()) < 0.5
+    expected = model.logit_scale.clamp(max=50.0) * (x[..., :N_DIGITS] @ model.poles[:, :N_DIGITS].T)
+    got = model._logits(x)
+    assert torch.allclose(got, expected, atol=1e-6)
+    x_dec = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
+    sliced = model.logit_scale.clamp(max=50.0) * (x_dec @ model.poles[:, :N_DIGITS].T)
+    assert not torch.allclose(got, sliced, atol=1e-3)

@@ -34,7 +34,7 @@ class BipartiteSnTmSolver(nn.Module):
     """
     Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps.
 
-    Readout: ``normalize(x[..., :9])``; ``logits = logit_scale · (x_dec @ P[:, :9].T)``
+    Readout: unnormalized ``logits = logit_scale · (x[..., :9] @ P[:, :9].T)``
     with ``logit_scale`` init 4, clamp ≤50. Train CE with γ=0.9; ``λ_ω=0`` (log only).
     """
 
@@ -79,10 +79,8 @@ class BipartiteSnTmSolver(nn.Module):
         self.register_buffer('cell_house_idx', cell_house_idx(), persistent=True)
 
     def _logits(self, x: Tensor) -> Tensor:
-        x_dec = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
         scale = self.logit_scale.clamp(max=LOGIT_SCALE_MAX)
-        p9 = self.poles[:, :N_DIGITS]
-        return scale * (x_dec @ p9.T)
+        return scale * (x[..., :N_DIGITS] @ self.poles[:, :N_DIGITS].T)
 
     def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """
@@ -139,7 +137,7 @@ class BipartiteSnTmSolver(nn.Module):
         omega_k = omegas[-1]
         scratch_energy = x[..., SCRATCH_START:].square().mean()
         blank_np = x[..., BLANK_COORD].square().mean()
-        # Watch-only: unnormalized claims (matches house_features; not slice-normed like _logits).
+        # Watch-only: unnormalized claims (matches house_features + unnorm _logits).
         p9 = self.poles[:, :N_DIGITS]
         q = F.relu(x[..., :N_DIGITS] @ p9.T)
         claim_energy = q.square().mean()
