@@ -9,7 +9,8 @@ MLP updates \(g\)). Pass `--no-gauge` only for the cells-only ablation (729 MLP)
 `--mixer geo_karcher` / `geo_log` are cells-only geodesic affinities + 2-step
 Karcher (state←mean, or `v=Log` then Exp).
 `--mixer geo_transformer` is cells-only (no live T²): Linear(s)+e_row+e_col →
-2-layer Transformer → shared SiLU-expand head → tangent/Exp (params O(1) in M).
+1× residual MultiheadAttention + LN → L=2 SiLU head (d_ff=4d) → tangent/Exp
+(params O(1) in M; no TransformerEncoder / layer FFN).
 
 Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache).
 

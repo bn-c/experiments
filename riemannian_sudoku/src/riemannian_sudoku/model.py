@@ -28,7 +28,7 @@ _MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
 _MLP_WIDTHS = ('default', 'expand')
 _MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer')
 _GEO_MIXERS = ('geo_karcher', 'geo_log')
-_GEO_TF_LAYERS = 2
+_GEO_TF_LAYERS = 1  # single residual MHA (no TransformerEncoder FFN)
 _GEO_KARCHER_STEPS = 2
 _SOFTPLUS_INV_1 = math.log(math.e - 1.0)  # softplus⁻¹(1)
 
@@ -176,8 +176,8 @@ class GeometricCrossAttention(nn.Module):
 class ManifoldTokenTransformer(nn.Module):
     """
     Cells-only manifold tokens (no live ``T²``): ``Linear(s) + e_row[r] + e_col[c]``
-    → 2-layer Transformer (MHA + SiLU FFN) → shared SiLU-expand head
-    ``d→2d→SiLU→2d→SiLU→9``. No box embed in v1.
+    → one residual ``MultiheadAttention`` + LayerNorm (no encoder FFN) → shared
+    L=2 SiLU FFN head ``d→4d→SiLU→4d→SiLU→9``. No box embed.
 
     Params scale ``O(1)`` in ``M`` (sequence length 81).
     """
@@ -186,6 +186,8 @@ class ManifoldTokenTransformer(nn.Module):
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError(f'd_model={d_model} must be divisible by n_heads={n_heads}')
+        if n_layers != 1:
+            raise ValueError(f'geo_transformer uses exactly 1 residual MHA, got n_layers={n_layers}')
         self.d_model = d_model
         self.encode = nn.Linear(9, d_model)
         self.row_embed = nn.Embedding(9, d_model)
@@ -194,33 +196,27 @@ class ManifoldTokenTransformer(nn.Module):
         cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81)
         self.register_buffer('cell_rows', rows, persistent=True)
         self.register_buffer('cell_cols', cols, persistent=True)
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=4 * d_model,
-            dropout=0.0,
-            activation=F.silu,
-            batch_first=True,
-            norm_first=False,
+        # Plain MHA + residual LN — NOT TransformerEncoder / EncoderLayer (no layer FFN).
+        self.mha = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=n_heads, dropout=0.0, batch_first=True
         )
-        # SiLU FFN disables nested-tensor path; silence the enable_nested_tensor warn.
-        self.transformer = nn.TransformerEncoder(
-            enc_layer, num_layers=n_layers, enable_nested_tensor=False
-        )
-        # Shared SiLU-expand head (plan: d→2d→SiLU→2d→SiLU→9).
+        self.norm = nn.LayerNorm(d_model)
+        # Only MLP: L=2 SiLU expand with d_ff=4d (128→512→SiLU→512→SiLU→9).
+        d_ff = 4 * d_model
         self.head = nn.Sequential(
-            nn.Linear(d_model, 2 * d_model),
+            nn.Linear(d_model, d_ff),
             nn.SiLU(),
-            nn.Linear(2 * d_model, 2 * d_model),
+            nn.Linear(d_ff, d_ff),
             nn.SiLU(),
-            nn.Linear(2 * d_model, 9),
+            nn.Linear(d_ff, 9),
         )
 
     def forward(self, s: Tensor) -> Tensor:
         """``s`` ``(B, 81, 9)`` → ambient velocity ``(B, 81, 9)``."""
         pos = self.row_embed(self.cell_rows) + self.col_embed(self.cell_cols)
         h = self.encode(s) + pos
-        h = self.transformer(h)
+        attn_out, _ = self.mha(h, h, h, need_weights=False)
+        h = self.norm(h + attn_out)
         return self.head(h)
 
 
@@ -281,7 +277,7 @@ class RiemannianSudokuSolver(nn.Module):
     (1) state ← mean, or (2) ``v = Log_x(m)`` then Exp + orthant + kinetic.
 
     ``geo_transformer``: cells-only (no live ``T²``) — ``Linear(s)+e_row+e_col`` →
-    2-layer Transformer → shared SiLU-expand head → tangent / Exp (O(1) in M).
+    1× residual MultiheadAttention + LN → L=2 SiLU head (d_ff=4d) → tangent / Exp.
     """
 
     def __init__(

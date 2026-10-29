@@ -1,4 +1,4 @@
-"""Manifold-token Transformer mixer: norms, clue freeze, tangent, params, backward."""
+"""Manifold-token Transformer mixer: 1× residual MHA + L=2 FFN head."""
 
 from __future__ import annotations
 
@@ -71,11 +71,11 @@ def test_geo_transformer_forward_backward() -> None:
 
 
 def test_geo_transformer_param_count_o1_in_m() -> None:
-    """Shared encode/head → params ≪ ambient cross MLP (~1M) and independent of M."""
+    """Shared encode/MHA/head → params ≪ ambient cross MLP (~1M); no encoder FFN."""
     model = RiemannianSudokuSolver(mixer='geo_transformer', d_model=128, n_heads=4)
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert n < 1_000_000
-    assert n > 100_000  # real Transformer, not the 2-scalar geo arms
+    assert n > 50_000  # real MHA + L=2 head, not the 2-scalar geo arms
     assert model.geo_tf is not None
     assert model.cross_mlp is None
     assert model.use_gauge is False
@@ -84,10 +84,16 @@ def test_geo_transformer_param_count_o1_in_m() -> None:
     assert model.geo_tf.col_embed.num_embeddings == 9
     assert not hasattr(model.geo_tf, 'box_embed')
     assert not hasattr(model.geo_tf, 'type_embed')
-    # Head is shared SiLU-expand: d→2d→2d→9
+    # Locked: plain MHA, not TransformerEncoder / EncoderLayer.
+    assert isinstance(model.geo_tf.mha, torch.nn.MultiheadAttention)
+    assert isinstance(model.geo_tf.norm, torch.nn.LayerNorm)
+    assert not hasattr(model.geo_tf, 'transformer')
+    assert not any(isinstance(m, torch.nn.TransformerEncoderLayer) for m in model.modules())
+    assert not any(isinstance(m, torch.nn.TransformerEncoder) for m in model.modules())
+    # Head is L=2 SiLU expand with d_ff=4d: 128→512→512→9
     head = model.geo_tf.head
-    assert isinstance(head[0], torch.nn.Linear) and head[0].out_features == 256
-    assert isinstance(head[2], torch.nn.Linear) and head[2].out_features == 256
+    assert isinstance(head[0], torch.nn.Linear) and head[0].out_features == 512
+    assert isinstance(head[2], torch.nn.Linear) and head[2].out_features == 512
     assert isinstance(head[4], torch.nn.Linear) and head[4].out_features == 9
 
 
@@ -100,6 +106,8 @@ def test_manifold_token_transformer_shapes() -> None:
     assert tf.cell_rows.shape == (81,) and tf.cell_cols.shape == (81,)
     # Cell 10 = row1 col1 → embeds indexed correctly.
     assert int(tf.cell_rows[10]) == 1 and int(tf.cell_cols[10]) == 1
+    # Zero TransformerEncoderLayer FFN params (linear1/linear2).
+    assert sum(1 for n, _ in tf.named_modules() if 'linear1' in n or 'linear2' in n) == 0
 
 
 def test_resolve_mixer_geo_transformer() -> None:
