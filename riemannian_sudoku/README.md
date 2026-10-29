@@ -5,6 +5,8 @@ an Exp-map + abs-renorm retraction. Default mixer `--mixer euclid_axial` uses
 factorized row/col/box axial attention and fixed Clifford \(T^3\) PE.
 `--mixer cross_coupled` replaces that with a live \(T^2\) (row×col) gauge and a
 shared ambient MLP → per-manifold tangent project → parallel Exp.
+`--mixer geo_karcher` / `geo_log` are cells-only geodesic affinities + 2-step
+Karcher (state←mean, or `v=Log` then Exp).
 
 Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache).
 

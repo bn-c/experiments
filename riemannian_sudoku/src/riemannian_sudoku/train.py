@@ -665,7 +665,7 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled'],
+        choices=['euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log'],
         help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
     )
     t.add_argument(
@@ -713,7 +713,7 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled'],
+        choices=['euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log'],
         help='override mixer; default reads ckpt args',
     )
     e.add_argument(
