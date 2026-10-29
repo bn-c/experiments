@@ -246,6 +246,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         use_gauge=args.use_gauge,
         mlp_activation=args.mlp_activation,
     ).to(device)
+    # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
+    args.use_gauge = bool(model.use_gauge)
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
         # Same hot-path wrap idea as sfprm_miniarc/train.py --compile.

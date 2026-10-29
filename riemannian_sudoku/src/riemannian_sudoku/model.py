@@ -102,9 +102,10 @@ class GeometricCrossAttention(nn.Module):
     """
     Cells-only geodesic affinities + 2-step weighted Karcher mean on ``S⁸₊``.
 
-    Affinities ``α_ij ∝ exp(-d²/(2σ²))`` with learnable ``σ = softplus(·)``,
-    masked to row∪col∪box neighbors so position+clues break blank symmetry.
-    Clues stay visible as keys; callers freeze clue *queries* via ``blank_mask``.
+    Affinities ``α_ij ∝ exp(-d²/(2σ²))`` with learnable ``σ = softplus(·)``.
+    Keys = **clues** inside row∪col∪box (blank–blank RBF would dominate because
+    blanks start identical; clues carry the only digit signal). Callers freeze
+    clue *queries* via ``blank_mask`` on the update.
     """
 
     def __init__(self, karcher_steps: int = _GEO_KARCHER_STEPS, init_sigma: float = 1.0) -> None:
@@ -123,17 +124,25 @@ class GeometricCrossAttention(nn.Module):
     def eta(self) -> Tensor:
         return F.softplus(self.raw_eta).clamp_min(1e-4)
 
-    def affinities(self, s: Tensor, eps: float = 1e-6) -> Tensor:
-        """Geodesic RBF affinities ``(B, 81, 81)`` over unit neighbors; rows sum to 1."""
+    def affinities(self, s: Tensor, blank_mask: Tensor, eps: float = 1e-6) -> Tensor:
+        """
+        Geodesic RBF affinities ``(B, 81, 81)`` over clue neighbors; rows sum to 1.
+
+        ``blank_mask`` ``(B, 81)``: 1 = blank (excluded as key), 0 = clue (key).
+        """
         cos = torch.einsum('bid,bjd->bij', s, s).clamp(-1.0 + eps, 1.0 - eps)
         d2 = cos.acos().square()
         logits = -d2 / (2.0 * self.sigma.square())
-        logits = logits.masked_fill(~self.neighbor_mask.unsqueeze(0), float('-inf'))
-        return torch.softmax(logits, dim=-1)
+        # Keys: unit-neighbor clues only.
+        clue_keys = blank_mask <= 0  # (B, 81)
+        allow = self.neighbor_mask.unsqueeze(0) & clue_keys.unsqueeze(1)
+        logits = logits.masked_fill(~allow, float('-inf'))
+        alpha = torch.softmax(logits, dim=-1)
+        return torch.nan_to_num(alpha, nan=0.0)
 
-    def forward(self, s: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, s: Tensor, blank_mask: Tensor) -> tuple[Tensor, Tensor]:
         """Returns ``(m, alpha)`` — Karcher means and affinities for all cells."""
-        alpha = self.affinities(s)
+        alpha = self.affinities(s, blank_mask)
         m = s
         eta = self.eta
         eps = 1e-8
@@ -362,7 +371,7 @@ class RiemannianSudokuSolver(nn.Module):
         velocities: list[Tensor] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
-            m, _alpha = self.geo_attn(s)
+            m, _alpha = self.geo_attn(s, blank_mask)
             if self.mixer == 'geo_karcher':
                 # State ← mean on blanks; Log displacement for kinetic logging only.
                 m = project_to_orthant_sphere(m)

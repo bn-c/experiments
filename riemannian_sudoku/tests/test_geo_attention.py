@@ -40,17 +40,21 @@ def test_exp_log_roundtrip_orthant() -> None:
     assert torch.allclose(y2, y, atol=2e-4)
 
 
-def test_affinities_sum_to_one_over_neighbors() -> None:
+def test_affinities_sum_to_one_over_clue_neighbors() -> None:
     torch.manual_seed(2)
     attn = GeometricCrossAttention()
     s = project_to_orthant_sphere(torch.rand(3, 81, 9) + 0.1)
-    alpha = attn.affinities(s)
+    blank = torch.ones(3, 81)
+    blank[:, :15] = 0.0  # first 15 cells are clues (keys)
+    alpha = attn.affinities(s, blank)
     assert alpha.shape == (3, 81, 81)
-    row_sum = alpha.sum(dim=-1)
-    assert torch.allclose(row_sum, torch.ones_like(row_sum), atol=1e-5)
-    assert (alpha >= 0).all()
-    # Non-neighbors get zero mass (row 0 cell 0 vs cell 80 = different row/col/box).
+    # Blank keys get zero mass.
+    assert torch.allclose(alpha[:, :, 15:], torch.zeros(3, 81, 66), atol=1e-6)
+    # Non-neighbor clue (cell 0 vs cell 80) stays zero even if 80 were a clue.
     assert torch.allclose(alpha[:, 0, 80], torch.zeros(3), atol=1e-6)
+    # Rows with ≥1 allowed key sum to 1 (cell 0 shares units with clues 1..8).
+    assert torch.allclose(alpha[:, 0].sum(dim=-1), torch.ones(3), atol=1e-5)
+    assert (alpha >= 0).all()
 
 
 def test_geo_log_sphere_norms_and_clue_freeze() -> None:
