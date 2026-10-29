@@ -109,18 +109,21 @@ class BipartiteSnTmSolver(nn.Module):
 
     @staticmethod
     def _blank_ce(logits: Tensor, solution: Tensor, mask: Tensor, label_smoothing: float) -> Tensor:
-        """Mean blank-cell CE; ``solution`` digits 1..9 → class 0..8."""
-        # (B, 81, 9) → flatten blanks
+        """Mean blank-cell CE; ``solution`` digits 1..9 → class 0..8.
+
+        Masked mean (no ``.item()`` / bool branch) so ``torch.compile`` stays
+        Inductor-friendly.
+        """
         flat_logits = logits.reshape(-1, N_DIGITS)
         flat_target = (solution - 1).clamp(0, N_DIGITS - 1).reshape(-1)
-        flat_mask = mask.reshape(-1) > 0
-        if not bool(flat_mask.any()):
-            return logits.new_zeros(())
-        return F.cross_entropy(
-            flat_logits[flat_mask],
-            flat_target[flat_mask],
+        flat_mask = mask.reshape(-1)
+        per = F.cross_entropy(
+            flat_logits,
+            flat_target,
+            reduction='none',
             label_smoothing=label_smoothing,
         )
+        return (per * flat_mask).sum() / flat_mask.sum().clamp_min(1.0)
 
     def forward(
         self,
