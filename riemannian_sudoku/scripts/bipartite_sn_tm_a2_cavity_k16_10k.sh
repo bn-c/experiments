@@ -24,7 +24,7 @@ SUMMARY="logs/${NAME}-summary.txt"
 mkdir -p "$CKPT"
 
 {
-  echo "BASELINE_CAVITY_K8=blank@10k=0.5235 n_params=687993 run=2jdehoej cavity_house_in K=8
+  echo "BASELINE_CAVITY_K8=blank@10k=0.5235 n_params=687993 run=2jdehoej cavity_house_in K=8"
   echo "BASELINE_FILM=blank@10k=0.5436 n_params=681441 run=wdl3nq6v FiLM_vf_x"
   echo "BASELINE_G=geo_transformer blank@10k=0.512 n_params=501257 run=6rp4e5u4"
   echo "ARM=bipartite_sn_tm_A2 cavity_house_in H_X=424 house_in=123 supervise_all_steps=ramp K=${NUM_STEPS}"
