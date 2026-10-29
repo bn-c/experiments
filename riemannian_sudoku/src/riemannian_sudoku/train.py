@@ -57,6 +57,15 @@ def _resolve_mlp_activation(cli_act: str | None, ckpt_args: dict | None = None) 
     return 'gelu'
 
 
+def _resolve_mlp_layers(cli_layers: int | None, ckpt_args: dict | None = None) -> int:
+    """CLI ``--mlp-layers`` wins when set (>0); else ckpt; else 1 (single mid block)."""
+    if cli_layers is not None and int(cli_layers) > 0:
+        return int(cli_layers)
+    if ckpt_args is not None and 'mlp_layers' in ckpt_args:
+        return max(1, int(ckpt_args['mlp_layers']))
+    return 1
+
+
 def _cosine_t_max(*, steps: int, step: int, lr_cosine_steps: int) -> int | None:
     """CosineAnnealingLR ``T_max``, or ``None`` to hold the floor (past horizon).
 
@@ -173,6 +182,7 @@ def _save_ckpt(
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
                 'mlp_activation': args.mlp_activation,
+                'mlp_layers': args.mlp_layers,
             },
         },
         path,
@@ -232,6 +242,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.mixer = _resolve_mixer(args.mixer, ckpt_args)
     args.use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
     args.mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
+    args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
 
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
@@ -245,7 +256,9 @@ def train_cmd(args: argparse.Namespace) -> None:
         mixer=args.mixer,
         use_gauge=args.use_gauge,
         mlp_activation=args.mlp_activation,
+        mlp_layers=args.mlp_layers,
     ).to(device)
+    args.mlp_layers = int(model.mlp_layers)
     # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
     args.use_gauge = bool(model.use_gauge)
     if args.compile:
@@ -334,6 +347,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
                 'mlp_activation': args.mlp_activation,
+                'mlp_layers': args.mlp_layers,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -560,6 +574,7 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'MIXER={args.mixer}')
     print(f'USE_GAUGE={int(args.use_gauge)}')
     print(f'MLP_ACTIVATION={args.mlp_activation}')
+    print(f'MLP_LAYERS={args.mlp_layers}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -572,6 +587,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
     mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt_args)
     use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
     mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
+    mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     model = RiemannianSudokuSolver(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -580,6 +596,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
         mixer=mixer,
         use_gauge=use_gauge,
         mlp_activation=mlp_activation,
+        mlp_layers=mlp_layers,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -683,6 +700,12 @@ def main() -> None:
         help='cross_coupled ambient MLP nonlinearity (default gelu; axial unchanged; on --resume reads ckpt)',
     )
     t.add_argument(
+        '--mlp-layers',
+        type=int,
+        default=None,
+        help='cross_coupled mid nonlinear blocks (default 1; swiglu: SwiGLU×N; on --resume reads ckpt)',
+    )
+    t.add_argument(
         '--compile',
         action='store_true',
         help='wrap model.forward with torch.compile(mode=default); default off',
@@ -729,6 +752,12 @@ def main() -> None:
         default=None,
         choices=['gelu', 'silu', 'swiglu'],
         help='override cross MLP activation; default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-layers',
+        type=int,
+        default=None,
+        help='override cross MLP mid-block count; default reads ckpt args',
     )
 
     args = parser.parse_args()

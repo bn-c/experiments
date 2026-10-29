@@ -230,6 +230,7 @@ def test_cross_mlp_swiglu_fair_params_and_forward() -> None:
     # Fair-ish: within 0.1% of GELU (h≈170 mid width).
     assert abs(n_w - n_g) / n_g < 0.001, f'swiglu={n_w} gelu={n_g}'
     assert isinstance(swig.cross_mlp[1], _SwiGLU)
+    assert swig.mlp_layers == 1
     puzzle = torch.randint(0, 10, (2, 81))
     puzzle[:, 0] = 2
     solution = torch.randint(1, 10, (2, 81))
@@ -242,6 +243,40 @@ def test_cross_mlp_swiglu_fair_params_and_forward() -> None:
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in swig.parameters())
 
 
+def test_cross_mlp_swiglu_two_layers() -> None:
+    """``mlp_layers=2``: Linear → SwiGLU → SwiGLU → Linear; deeper than Arm W."""
+    from riemannian_sudoku.model import _SwiGLU
+
+    torch.manual_seed(6)
+    deep = _cc_model(
+        use_gauge=False,
+        mlp_activation='swiglu',
+        mlp_layers=2,
+        kinetic_weight=0.5,
+        constraint_weight=0.0,
+    )
+    shallow = _cc_model(use_gauge=False, mlp_activation='swiglu', mlp_layers=1)
+    assert deep.mlp_layers == 2
+    assert isinstance(deep.cross_mlp[1], _SwiGLU)
+    assert isinstance(deep.cross_mlp[2], _SwiGLU)
+    assert isinstance(deep.cross_mlp[3], nn.Linear)
+    n_d = sum(p.numel() for p in deep.parameters() if p.requires_grad)
+    n_s = sum(p.numel() for p in shallow.parameters() if p.requires_grad)
+    # Second SwiGLU adds ≈ one Linear(512,512) worth of params (261972).
+    assert n_d > n_s
+    assert n_d - n_s == 261_972, f'delta={n_d - n_s}'
+    assert n_d == 1_271_681
+    puzzle = torch.randint(0, 10, (2, 81))
+    puzzle[:, 0] = 3
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    out = deep(puzzle, solution, mask)
+    assert torch.isfinite(out['loss'])
+    assert 'g' not in out
+    out['loss'].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in deep.parameters())
+
+
 def test_resolve_mlp_activation() -> None:
     from riemannian_sudoku.train import _resolve_mlp_activation
 
@@ -251,10 +286,29 @@ def test_resolve_mlp_activation() -> None:
     assert _resolve_mlp_activation('swiglu', {'mlp_activation': 'silu'}) == 'swiglu'
 
 
+def test_resolve_mlp_layers() -> None:
+    from riemannian_sudoku.train import _resolve_mlp_layers
+
+    assert _resolve_mlp_layers(None) == 1
+    assert _resolve_mlp_layers(None, {}) == 1
+    assert _resolve_mlp_layers(None, {'mlp_layers': 2}) == 2
+    assert _resolve_mlp_layers(3, {'mlp_layers': 2}) == 3
+    assert _resolve_mlp_layers(0, {'mlp_layers': 2}) == 2  # 0 = unset → ckpt
+
+
 def test_unknown_mlp_activation_raises() -> None:
     try:
         RiemannianSudokuSolver(mixer='cross_coupled', mlp_activation='relu')
     except ValueError as e:
         assert 'relu' in str(e)
+    else:
+        raise AssertionError('expected ValueError')
+
+
+def test_mlp_layers_lt_one_raises() -> None:
+    try:
+        RiemannianSudokuSolver(mixer='cross_coupled', mlp_layers=0)
+    except ValueError as e:
+        assert 'mlp_layers' in str(e)
     else:
         raise AssertionError('expected ValueError')

@@ -46,25 +46,37 @@ class _SwiGLU(nn.Module):
         return self.w3(F.silu(a) * b)
 
 
-def _cross_mlp(in_dim: int, out_dim: int, hidden: int, activation: str) -> nn.Module:
-    """Build cross_coupled ambient MLP; ``activation`` ∈ gelu|silu|swiglu."""
+def _cross_mlp(
+    in_dim: int,
+    out_dim: int,
+    hidden: int,
+    activation: str,
+    n_layers: int = 1,
+) -> nn.Module:
+    """Build cross_coupled ambient MLP; ``activation`` ∈ gelu|silu|swiglu.
+
+    ``n_layers`` = number of mid nonlinear blocks (default 1 = prior topology):
+    - swiglu: ``Linear → (SwiGLU)×n → Linear``
+    - gelu/silu: ``Linear → act → (Linear → act)×n → Linear`` with one mid Linear when n=1
+    """
     if activation not in _MLP_ACTIVATIONS:
         raise ValueError(f'unknown mlp_activation {activation!r}; expected gelu|silu|swiglu')
+    if n_layers < 1:
+        raise ValueError(f'mlp_layers must be >= 1, got {n_layers}')
+    layers: list[nn.Module] = [nn.Linear(in_dim, hidden)]
     if activation == 'swiglu':
-        # Linear → SwiGLU (fair mid width) → Linear; silu gate lives inside SwiGLU.
-        return nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            _SwiGLU(hidden),
-            nn.Linear(hidden, out_dim),
-        )
-    act: nn.Module = nn.GELU() if activation == 'gelu' else nn.SiLU()
-    return nn.Sequential(
-        nn.Linear(in_dim, hidden),
-        act,
-        nn.Linear(hidden, hidden),
-        type(act)(),  # fresh instance (parameter-free; keeps Sequential tidy)
-        nn.Linear(hidden, out_dim),
-    )
+        # silu gate lives inside each SwiGLU; fair mid width h≈170 per block.
+        for _ in range(n_layers):
+            layers.append(_SwiGLU(hidden))
+        layers.append(nn.Linear(hidden, out_dim))
+        return nn.Sequential(*layers)
+    act_cls: type[nn.Module] = nn.GELU if activation == 'gelu' else nn.SiLU
+    layers.append(act_cls())
+    for _ in range(n_layers):
+        layers.append(nn.Linear(hidden, hidden))
+        layers.append(act_cls())
+    layers.append(nn.Linear(hidden, out_dim))
+    return nn.Sequential(*layers)
 
 
 def _torus_t3_pe() -> Tensor:
@@ -227,17 +239,21 @@ class RiemannianSudokuSolver(nn.Module):
         mixer: str = 'euclid_axial',
         use_gauge: bool = True,
         mlp_activation: str = 'gelu',
+        mlp_layers: int = 1,
     ) -> None:
         super().__init__()
         if mixer not in _MIXERS:
             raise ValueError(f'unknown mixer {mixer!r}; expected {"|".join(_MIXERS)}')
         if mlp_activation not in _MLP_ACTIVATIONS:
             raise ValueError(f'unknown mlp_activation {mlp_activation!r}; expected gelu|silu|swiglu')
+        if mlp_layers < 1:
+            raise ValueError(f'mlp_layers must be >= 1, got {mlp_layers}')
         self.mixer = mixer
         # Gauge only exists on the cross_coupled path; axial / geo ignore the flag.
         self.use_gauge = bool(use_gauge) and mixer == 'cross_coupled'
         # Axial / geo stay free of MLP activation; flag only selects cross ambient MLP.
         self.mlp_activation = mlp_activation if mixer == 'cross_coupled' else 'gelu'
+        self.mlp_layers = int(mlp_layers) if mixer == 'cross_coupled' else 1
         self.d_model = d_model
         self.num_steps = num_steps
         self.dt = dt
@@ -265,10 +281,12 @@ class RiemannianSudokuSolver(nn.Module):
             self.register_buffer('t3_pe', _torus_t3_pe(), persistent=True)
         elif mixer == 'cross_coupled':
             # With gauge: 765→512→…→765; --no-gauge: 729→512→…→729 (cells only).
-            # gelu/silu: 512→512 mid Linear; swiglu: mid SwiGLU with h≈170 (fair params).
+            # gelu/silu: mid Linear(s); swiglu: mid SwiGLU(s) with h≈170 (fair params).
             in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
             out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S
-            self.cross_mlp = _cross_mlp(in_dim, out_dim, _CROSS_H, self.mlp_activation)
+            self.cross_mlp = _cross_mlp(
+                in_dim, out_dim, _CROSS_H, self.mlp_activation, n_layers=self.mlp_layers
+            )
         else:
             # geo_karcher / geo_log: cells-only geometric attention (no gauge, no MLP v).
             self.geo_attn = GeometricCrossAttention(karcher_steps=_GEO_KARCHER_STEPS)
