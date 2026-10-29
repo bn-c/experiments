@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from riemannian_sudoku.data import SudokuDataset, SudokuTorchDataset, split_train_val
 from riemannian_sudoku.geometry import sudoku_group_indices
-from riemannian_sudoku.model import RiemannianSudokuSolver
+from riemannian_sudoku.model import RiemannianSudokuSolver, build_solver
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def unit_group_accuracies(
 
 
 @torch.no_grad()
-def evaluate(model: RiemannianSudokuSolver, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
     """Blank / exact / row / col / box accuracy on a loader."""
     model.eval()
     blank_sum = 0.0
@@ -158,7 +158,7 @@ def evaluate(model: RiemannianSudokuSolver, loader: DataLoader, device: torch.de
 
 def _save_ckpt(
     path: Path,
-    model: RiemannianSudokuSolver,
+    model: torch.nn.Module,
     opt: torch.optim.Optimizer,
     step: int,
     n_params: int,
@@ -255,7 +255,8 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     args.mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
 
-    model = RiemannianSudokuSolver(
+    model = build_solver(
+        args.mixer,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
@@ -264,16 +265,15 @@ def train_cmd(args: argparse.Namespace) -> None:
         gauge_kinetic_weight=args.gauge_kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
-        mixer=args.mixer,
         use_gauge=args.use_gauge,
         mlp_activation=args.mlp_activation,
         mlp_layers=args.mlp_layers,
         mlp_width=args.mlp_width,
     ).to(device)
-    args.mlp_layers = int(model.mlp_layers)
-    args.mlp_width = str(model.mlp_width)
+    args.mlp_layers = int(getattr(model, 'mlp_layers', 1))
+    args.mlp_width = str(getattr(model, 'mlp_width', 'default'))
     # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
-    args.use_gauge = bool(model.use_gauge)
+    args.use_gauge = bool(getattr(model, 'use_gauge', False))
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
         # Same hot-path wrap idea as sfprm_miniarc/train.py --compile.
@@ -426,6 +426,15 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/lr': float(opt.param_groups[0]['lr']),
             'train/step': step,
         }
+        # Bipartite diags: ||ω_1||², ||ω_K||², scratch energy, North-pole residual.
+        for key, wandb_key in (
+            ('omega_sq_1', 'train/omega_sq_1'),
+            ('omega_sq_k', 'train/omega_sq_k'),
+            ('scratch_energy', 'train/scratch_energy'),
+            ('blank_np', 'train/blank_np'),
+        ):
+            if key in out:
+                metrics[wandb_key] = float(out[key])
         pbar.set_postfix(
             loss=f'{metrics["train/loss"]:.3f}',
             blank=f'{blank_acc:.2f}',
@@ -604,16 +613,18 @@ def eval_cmd(args: argparse.Namespace) -> None:
     mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
-    model = RiemannianSudokuSolver(
+    model = build_solver(
+        mixer,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
-        mixer=mixer,
         use_gauge=use_gauge,
         mlp_activation=mlp_activation,
         mlp_layers=mlp_layers,
         mlp_width=mlp_width,
+        gauge_kinetic_weight=float(ckpt_args.get('gauge_kinetic_weight', 0.0)),
+        supervise_all_steps=bool(ckpt_args.get('supervise_all_steps', False)),
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -701,7 +712,14 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer'],
+        choices=[
+            'euclid_axial',
+            'cross_coupled',
+            'geo_karcher',
+            'geo_log',
+            'geo_transformer',
+            'bipartite_sn_tm',
+        ],
         help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
     )
     t.add_argument(
@@ -768,7 +786,14 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer'],
+        choices=[
+            'euclid_axial',
+            'cross_coupled',
+            'geo_karcher',
+            'geo_log',
+            'geo_transformer',
+            'bipartite_sn_tm',
+        ],
         help='override mixer; default reads ckpt args',
     )
     e.add_argument(

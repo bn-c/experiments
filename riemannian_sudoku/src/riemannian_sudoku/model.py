@@ -27,6 +27,7 @@ _CROSS_H = 512
 _MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
 _MLP_WIDTHS = ('default', 'expand')
 _MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer')
+_ALL_MIXERS = _MIXERS + ('bipartite_sn_tm',)
 _GEO_MIXERS = ('geo_karcher', 'geo_log')
 _GEO_TF_LAYERS = 2
 _GEO_KARCHER_STEPS = 2
@@ -593,3 +594,45 @@ class RiemannianSudokuSolver(nn.Module):
             }
         )
         return out
+
+
+def build_solver(
+    mixer: str = 'euclid_axial',
+    *,
+    d_model: int = 128,
+    n_heads: int = 4,
+    num_steps: int = 8,
+    dt: float = 0.5,
+    kinetic_weight: float = 0.05,
+    gauge_kinetic_weight: float = 0.0,
+    constraint_weight: float = 0.1,
+    supervise_all_steps: bool = False,
+    use_gauge: bool = True,
+    mlp_activation: str = 'gelu',
+    mlp_layers: int = 1,
+    mlp_width: str = 'default',
+) -> nn.Module:
+    """Factory: ``bipartite_sn_tm`` → ``BipartiteSnTmSolver``; else ``RiemannianSudokuSolver``."""
+    if mixer == 'bipartite_sn_tm':
+        from riemannian_sudoku.solver import BipartiteSnTmSolver
+
+        return BipartiteSnTmSolver(
+            num_steps=num_steps,
+            omega_weight=gauge_kinetic_weight,  # λ_ω via --gauge-kinetic-weight
+            supervise_all_steps=supervise_all_steps,
+        )
+    return RiemannianSudokuSolver(
+        d_model=d_model,
+        n_heads=n_heads,
+        num_steps=num_steps,
+        dt=dt,
+        kinetic_weight=kinetic_weight,
+        gauge_kinetic_weight=gauge_kinetic_weight,
+        constraint_weight=constraint_weight,
+        supervise_all_steps=supervise_all_steps,
+        mixer=mixer,
+        use_gauge=use_gauge,
+        mlp_activation=mlp_activation,
+        mlp_layers=mlp_layers,
+        mlp_width=mlp_width,
+    )
