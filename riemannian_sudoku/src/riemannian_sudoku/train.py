@@ -57,6 +57,19 @@ def _resolve_mlp_activation(cli_act: str | None, ckpt_args: dict | None = None) 
     return 'gelu'
 
 
+def _cosine_t_max(*, steps: int, step: int, lr_cosine_steps: int) -> int | None:
+    """CosineAnnealingLR ``T_max``, or ``None`` to hold the floor (past horizon).
+
+    ``lr_cosine_steps=0`` → cool over remaining train steps (legacy).
+    ``lr_cosine_steps>0`` → cool over that many global steps, then hold ``η_min``.
+    """
+    if lr_cosine_steps <= 0:
+        return max(steps - step, 1)
+    if step >= lr_cosine_steps:
+        return None
+    return max(lr_cosine_steps - step, 1)
+
+
 def _blank_and_exact(
     pred: torch.Tensor,
     solution: torch.Tensor,
@@ -274,9 +287,17 @@ def train_cmd(args: argparse.Namespace) -> None:
 
     sched = None
     if args.lr_schedule == 'cosine':
-        # Cosine over remaining steps from current `step`; floor at 10% of peak LR.
-        remaining = max(args.steps - step, 1)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=remaining, eta_min=args.lr * 0.1)
+        # Floor at 10% of peak. Optional --lr-cosine-steps decouples T_max from --steps
+        # so long runs can cool like a short A/B (avoids stretched-cosine cliff).
+        floor = args.lr * 0.1
+        t_max = _cosine_t_max(steps=args.steps, step=step, lr_cosine_steps=args.lr_cosine_steps)
+        if t_max is None:
+            for pg in opt.param_groups:
+                pg['lr'] = floor
+            logger.info('Cosine horizon passed (step=%d); holding lr=%.6g', step, floor)
+        else:
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t_max, eta_min=floor)
+            logger.info('CosineAnnealingLR T_max=%d eta_min=%.6g', t_max, floor)
 
     early_bad = 0
     early_stopped = False
@@ -299,6 +320,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'batch_size': args.batch_size,
                 'lr': args.lr,
                 'lr_schedule': args.lr_schedule,
+                'lr_cosine_steps': args.lr_cosine_steps,
                 'grad_clip': args.grad_clip,
                 'early_stop_drop': args.early_stop_drop,
                 'early_stop_patience': args.early_stop_patience,
@@ -348,7 +370,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
         opt.step()
-        if sched is not None:
+        # Stop stepping after T_max so LR holds at eta_min (no cosine rebound).
+        if sched is not None and sched.last_epoch < sched.T_max:
             sched.step()
         step += 1
         if t_steady0 is None and step >= warmup_steps:
@@ -595,6 +618,12 @@ def main() -> None:
     t.add_argument('--batch-size', type=int, default=32)
     t.add_argument('--lr', type=float, default=3e-4)
     t.add_argument('--lr-schedule', type=str, default='constant', choices=['constant', 'cosine'])
+    t.add_argument(
+        '--lr-cosine-steps',
+        type=int,
+        default=0,
+        help='Cosine T_max in global steps (0=remaining --steps). After horizon, hold 0.1·peak',
+    )
     t.add_argument('--grad-clip', type=float, default=1.0, help='clip_grad_norm_ max_norm; 0 disables')
     t.add_argument(
         '--early-stop-drop',
