@@ -8,6 +8,8 @@ shared ambient MLP → per-manifold tangent project → parallel Exp (Method 1+2
 MLP updates \(g\)). Pass `--no-gauge` only for the cells-only ablation (729 MLP).
 `--mixer geo_karcher` / `geo_log` are cells-only geodesic affinities + 2-step
 Karcher (state←mean, or `v=Log` then Exp).
+`--mixer geo_transformer` is cells-only (no live T²): Linear(s)+e_row+e_col →
+2-layer Transformer → shared SiLU-expand head → tangent/Exp (params O(1) in M).
 
 Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache).
 

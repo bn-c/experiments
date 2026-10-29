@@ -26,8 +26,9 @@ _CROSS_G = 18 * 2  # 36
 _CROSS_H = 512
 _MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
 _MLP_WIDTHS = ('default', 'expand')
-_MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log')
+_MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer')
 _GEO_MIXERS = ('geo_karcher', 'geo_log')
+_GEO_TF_LAYERS = 2
 _GEO_KARCHER_STEPS = 2
 _SOFTPLUS_INV_1 = math.log(math.e - 1.0)  # softplus⁻¹(1)
 
@@ -172,6 +173,57 @@ class GeometricCrossAttention(nn.Module):
         return m, alpha
 
 
+class ManifoldTokenTransformer(nn.Module):
+    """
+    Cells-only manifold tokens (no live ``T²``): ``Linear(s) + e_row[r] + e_col[c]``
+    → 2-layer Transformer (MHA + SiLU FFN) → shared SiLU-expand head
+    ``d→2d→SiLU→2d→SiLU→9``. No box embed in v1.
+
+    Params scale ``O(1)`` in ``M`` (sequence length 81).
+    """
+
+    def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = _GEO_TF_LAYERS) -> None:
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(f'd_model={d_model} must be divisible by n_heads={n_heads}')
+        self.d_model = d_model
+        self.encode = nn.Linear(9, d_model)
+        self.row_embed = nn.Embedding(9, d_model)
+        self.col_embed = nn.Embedding(9, d_model)
+        rows = torch.arange(9).unsqueeze(1).expand(9, 9).reshape(81)
+        cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81)
+        self.register_buffer('cell_rows', rows, persistent=True)
+        self.register_buffer('cell_cols', cols, persistent=True)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=4 * d_model,
+            dropout=0.0,
+            activation=F.silu,
+            batch_first=True,
+            norm_first=False,
+        )
+        # SiLU FFN disables nested-tensor path; silence the enable_nested_tensor warn.
+        self.transformer = nn.TransformerEncoder(
+            enc_layer, num_layers=n_layers, enable_nested_tensor=False
+        )
+        # Shared SiLU-expand head (plan: d→2d→SiLU→2d→SiLU→9).
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 2 * d_model),
+            nn.SiLU(),
+            nn.Linear(2 * d_model, 2 * d_model),
+            nn.SiLU(),
+            nn.Linear(2 * d_model, 9),
+        )
+
+    def forward(self, s: Tensor) -> Tensor:
+        """``s`` ``(B, 81, 9)`` → ambient velocity ``(B, 81, 9)``."""
+        pos = self.row_embed(self.cell_rows) + self.col_embed(self.cell_cols)
+        h = self.encode(s) + pos
+        h = self.transformer(h)
+        return self.head(h)
+
+
 def init_sphere_state(puzzle: Tensor) -> tuple[Tensor, Tensor]:
     """
     Build ``s₀ ∈ S⁸₊`` and blank mask from digit grids.
@@ -227,6 +279,9 @@ class RiemannianSudokuSolver(nn.Module):
 
     ``geo_karcher`` / ``geo_log``: cells-only geodesic affinities + 2-step Karcher;
     (1) state ← mean, or (2) ``v = Log_x(m)`` then Exp + orthant + kinetic.
+
+    ``geo_transformer``: cells-only (no live ``T²``) — ``Linear(s)+e_row+e_col`` →
+    2-layer Transformer → shared SiLU-expand head → tangent / Exp (O(1) in M).
     """
 
     def __init__(
@@ -276,6 +331,7 @@ class RiemannianSudokuSolver(nn.Module):
         self.velocity = None
         self.cross_mlp = None
         self.geo_attn = None
+        self.geo_tf = None
 
         if mixer == 'euclid_axial':
             self.proj = nn.Linear(9 + 6, d_model)
@@ -296,6 +352,8 @@ class RiemannianSudokuSolver(nn.Module):
             self.cross_mlp = _cross_mlp(
                 in_dim, out_dim, hidden, self.mlp_activation, n_layers=self.mlp_layers
             )
+        elif mixer == 'geo_transformer':
+            self.geo_tf = ManifoldTokenTransformer(d_model=d_model, n_heads=n_heads)
         else:
             # geo_karcher / geo_log: cells-only geometric attention (no gauge, no MLP v).
             self.geo_attn = GeometricCrossAttention(karcher_steps=_GEO_KARCHER_STEPS)
@@ -331,6 +389,8 @@ class RiemannianSudokuSolver(nn.Module):
         if self.mixer == 'cross_coupled':
             s, velocities, states, _g = self._integrate_cross_coupled(puzzle)
             return s, velocities, states
+        if self.mixer == 'geo_transformer':
+            return self._integrate_geo_transformer(puzzle)
         if self.mixer in _GEO_MIXERS:
             return self._integrate_geo(puzzle)
         return self._integrate_euclid_axial(puzzle)
@@ -385,6 +445,30 @@ class RiemannianSudokuSolver(nn.Module):
         self._last_gauge = g
         self._last_gauge_velocities = gauge_velocities if self.use_gauge else None
         return s, velocities, states, g
+
+    def _integrate_geo_transformer(
+        self, puzzle: Tensor
+    ) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """Cells-only manifold-token Transformer → tangent project → Exp + orthant."""
+        assert self.geo_tf is not None
+        s, blank_mask = init_sphere_state(puzzle)
+        velocities: list[Tensor] = []
+        states: list[Tensor] = []
+        for _ in range(self.num_steps):
+            v = self.geo_tf(s)
+            v = project_tangent(s, v)
+            v = v * blank_mask.unsqueeze(-1)
+            velocities.append(v)
+            s = riemannian_exp_map_orthant(s, v, dt=self.dt)
+            clues = blank_mask == 0
+            digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
+            s_clue = torch.zeros_like(s)
+            s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
+            s = torch.where(clues.unsqueeze(-1), s_clue, s)
+            states.append(s)
+        self._last_gauge = None
+        self._last_gauge_velocities = None
+        return s, velocities, states
 
     def _integrate_geo(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """
@@ -449,6 +533,10 @@ class RiemannianSudokuSolver(nn.Module):
         if self.mixer == 'cross_coupled':
             s, velocities, states, g = self._integrate_cross_coupled(puzzle)
             gauge_velocities = self._last_gauge_velocities
+        elif self.mixer == 'geo_transformer':
+            s, velocities, states = self._integrate_geo_transformer(puzzle)
+            g = None
+            gauge_velocities = None
         elif self.mixer in _GEO_MIXERS:
             s, velocities, states = self._integrate_geo(puzzle)
             g = None
