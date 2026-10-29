@@ -178,3 +178,35 @@ def test_logits_unnormalized_matches_raw_dot() -> None:
     x_dec = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
     sliced = model.logit_scale.clamp(max=50.0) * (x_dec @ model.poles[:, :N_DIGITS].T)
     assert not torch.allclose(got, sliced, atol=1e-3)
+
+
+def test_house_features_relu_mean_scale() -> None:
+    """Option A: keep relu(q); claim moments are mean(q) / mean(q²), not sum."""
+    from riemannian_sudoku.coupled_vf import CoupledVectorField
+
+    torch.manual_seed(4)
+    vf = CoupledVectorField()
+    poles = simplex_etf_poles()
+    h_idx = house_cell_idx()
+    x = F.normalize(torch.randn(2, 81, D), dim=-1)
+    feat = vf.house_features(x, poles, h_idx)
+    assert feat.shape == (2, 27, 2 * D + 2 * N_DIGITS)
+    q = F.relu(x[..., :N_DIGITS] @ poles[:, :N_DIGITS].T)
+    q_h = q[:, h_idx]
+    expected = torch.cat(
+        [
+            x[:, h_idx].mean(dim=2),
+            (x[:, h_idx].var(dim=2, unbiased=False) + 1e-6).sqrt(),
+            q_h.mean(dim=2),
+            (q_h * q_h).mean(dim=2),
+        ],
+        dim=-1,
+    )
+    assert torch.allclose(feat, expected, atol=1e-6)
+    # Mean ≠ sum when house not identically zero
+    assert not torch.allclose(q_h.mean(dim=2), q_h.sum(dim=2), atol=1e-3)
+    # in_y stays 178 (zero-param scale)
+    emb_m = 2 * M
+    in_y = 2 * D + 2 * N_DIGITS + emb_m
+    assert in_y == 178
+    assert vf.vf_y[0].in_features == 178

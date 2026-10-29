@@ -41,7 +41,7 @@ class CoupledVectorField(nn.Module):
         self.m = m
         self.pe_dim = pe_dim
         emb_m = 2 * m  # Clifford cat(cos,sin)
-        # mean+std (2d) + sum q + sum q² (2·9) + y_emb (2m)
+        # mean+std (2d) + mean q + mean q² (2·9) + y_emb (2m)
         in_y = 2 * d + 2 * N_DIGITS + emb_m
         self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
         # FiLM first block: cell(+PE) + house shift/gate → H_X; then mid×2 + out.
@@ -63,10 +63,10 @@ class CoupledVectorField(nn.Module):
         house_cell_idx: Tensor,
     ) -> Tensor:
         """
-        Per-house ``(B, 27, 2D+18)``: mean+std of cell ``x`` + claim sums.
+        Per-house ``(B, 27, 2D+18)``: mean+std of cell ``x`` + claim means.
 
         ``q = relu(x_{:9} P_{:9}^T)`` (unnormalized; near-``e_8`` blanks stay ``q≈0``);
-        both ``∑q`` and ``∑q²`` over the 9 cells.
+        both ``mean(q)`` and ``mean(q²)`` over the 9 cells (Option A mean-scale).
         ``std = (var + 1e-6).sqrt()``. Static gather via ``HOUSE_CELL_IDX``.
         """
         # x_cells: (B, 27, 9, D)
@@ -77,9 +77,9 @@ class CoupledVectorField(nn.Module):
         p9 = poles[:, :N_DIGITS]  # (9, 9)
         q = F.relu(x[..., :N_DIGITS] @ p9.T)  # (B, 81, 9)
         q_h = q[:, house_cell_idx]  # (B, 27, 9, 9)
-        sum_q = q_h.sum(dim=2)
-        sum_q2 = q_h.square().sum(dim=2)
-        return torch.cat([mean, std, sum_q, sum_q2], dim=-1)
+        q_mean = q_h.mean(dim=2)
+        q_sq_mean = (q_h * q_h).mean(dim=2)
+        return torch.cat([mean, std, q_mean, q_sq_mean], dim=-1)
 
     def omega(
         self,
