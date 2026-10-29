@@ -430,6 +430,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         for key, wandb_key in (
             ('omega_sq_1', 'train/omega_sq_1'),
             ('omega_sq_k', 'train/omega_sq_k'),
+            ('gate_mean', 'train/gate_mean'),
             ('scratch_energy', 'train/scratch_energy'),
             ('blank_np', 'train/blank_np'),
             ('claim_energy', 'train/claim_energy'),

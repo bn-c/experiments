@@ -52,3 +52,20 @@ def geodesic_step(
 def torus_step(y: Tensor, omega: Tensor) -> Tensor:
     """Advance house angles: ``y ← y + ω`` (unwrapped; VF learns scale)."""
     return y + omega
+
+
+def gated_torus_step(
+    y: Tensor,
+    omega: Tensor,
+    alpha: Tensor,
+    *,
+    y0: float = math.pi / 4,
+) -> Tensor:
+    """
+    Anchored gated torus: ``y ← y0 + σ(α)⊙(y−y0) + ω``.
+
+    ``α`` already includes ``b0=+2`` via ``vf_y`` α-half bias. ``σ→0`` resets to
+    quadrature ``y0=π/4`` (not ``y=0``); ``σ→1`` preserves phase.
+    """
+    gate = torch.sigmoid(alpha)
+    return y0 + gate * (y - y0) + omega

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from riemannian_sudoku.coupled_vf import CoupledVectorField
-from riemannian_sudoku.geodesic import geodesic_step, torus_step
+from riemannian_sudoku.geodesic import gated_torus_step, geodesic_step
 from riemannian_sudoku.manifold_embed import (
     BLANK_COORD,
     D,
@@ -93,15 +93,19 @@ class BipartiteSnTmSolver(nn.Module):
         )
         x0 = x
         omegas: list[Tensor] = []
+        gates: list[Tensor] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
-            omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
+            omega, alpha = self.vf.omega_alpha(x, y, self.poles, self.house_cell_idx)
+            gate = torch.sigmoid(alpha)
             omegas.append(omega)
-            y = torus_step(y, omega)
+            gates.append(gate)
+            y = gated_torus_step(y, omega, alpha)
             u = self.vf.ambient_u(x, y, self.pe, self.cell_house_idx)
             x = geodesic_step(x, u, x0, is_clue)
             states.append(x)
         self._last_omegas = omegas
+        self._last_gates = gates
         self._last_is_clue = is_clue
         return x, omegas, states
 
@@ -135,6 +139,13 @@ class BipartiteSnTmSolver(nn.Module):
 
         omega1 = omegas[0]
         omega_k = omegas[-1]
+        gates = getattr(self, '_last_gates', None) or []
+        # mean σ(α+b0): α already includes α-half bias b0=+2.
+        gate_mean = (
+            torch.stack(gates).mean()
+            if gates
+            else omega_k.new_zeros(())
+        )
         scratch_energy = x[..., SCRATCH_START:].square().mean()
         blank_np = x[..., BLANK_COORD].square().mean()
         # Watch-only: unnormalized claims (matches house_features + unnorm _logits).
@@ -151,6 +162,7 @@ class BipartiteSnTmSolver(nn.Module):
             'velocities': omega_k,  # placeholder for kinetic log path
             'omega_sq_1': omega1.square().mean().detach(),
             'omega_sq_k': omega_k.square().mean().detach(),
+            'gate_mean': gate_mean.detach(),
             'scratch_energy': scratch_energy.detach(),
             'blank_np': blank_np.detach(),
             'claim_energy': claim_energy.detach(),

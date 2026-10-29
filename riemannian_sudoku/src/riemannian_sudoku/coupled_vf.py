@@ -1,4 +1,4 @@
-"""Shared (weight-tied) bipartite vector fields: S→T (ω) and T→S (u)."""
+"""Shared (weight-tied) bipartite vector fields: S→T (ω,α) and T→S (u)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from riemannian_sudoku.manifold_embed import D, M, N_DIGITS, PE_DIM, clifford_embed
+
+# Anchored gate: α-half bias so σ(α)≈0.88 at init (preserve phase vs reset to y0).
+ALPHA_BIAS_INIT = 2.0
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
@@ -21,11 +24,11 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
 
 class CoupledVectorField(nn.Module):
     """
-    Leapfrog pair: house ω from cell aggregates + Clifford ``y_emb``, then cell
-    ambient u from FiLM(cell+PE, house embeds) → mid×2 → out.
+    Leapfrog pair: house (ω,α) from cell aggregates + Clifford ``y_emb``, then
+    cell ambient u from FiLM(cell+PE, house embeds) → mid×2 → out.
 
-    A2 P2 widths ~681k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
-    ``M=16``, ``in_y=178``.
+    A2 gated+slot: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
+    ``M=16``, ``in_y=195``; ``vf_y`` out ``2M`` → ``(ω, α)``.
     """
 
     def __init__(
@@ -41,9 +44,14 @@ class CoupledVectorField(nn.Module):
         self.m = m
         self.pe_dim = pe_dim
         emb_m = 2 * m  # Clifford cat(cos,sin)
-        # mean+std (2d) + mean q + mean q² (2·9) + y_emb (2m)
-        in_y = 2 * d + 2 * N_DIGITS + emb_m
-        self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
+        # mean(x) 64 + flat q_h 81 + mean(q) 9 + mean(q²) 9 + y_emb 32 = 195
+        in_y = d + N_DIGITS * N_DIGITS + 2 * N_DIGITS + emb_m
+        self.vf_y = _mlp(in_y, h_y, 2 * m, n_mid=1)
+        # b0=+2.0 on α-half bias → σ(α+b0)≈0.88 at init (preserve phase).
+        last = self.vf_y[-1]
+        assert isinstance(last, nn.Linear)
+        with torch.no_grad():
+            last.bias[m:].fill_(ALPHA_BIAS_INIT)
         # FiLM first block: cell(+PE) + house shift/gate → H_X; then mid×2 + out.
         self.x_in_cell = nn.Linear(d + pe_dim, h_x)
         self.x_in_house_shift = nn.Linear(3 * emb_m, h_x)
@@ -63,23 +71,37 @@ class CoupledVectorField(nn.Module):
         house_cell_idx: Tensor,
     ) -> Tensor:
         """
-        Per-house ``(B, 27, 2D+18)``: mean+std of cell ``x`` + claim means.
+        Per-house ``(B, 27, D+81+18)``: mean of cell ``x`` + flat slot claims + moments.
 
         ``q = relu(x_{:9} P_{:9}^T)`` (unnormalized; near-``e_8`` blanks stay ``q≈0``);
-        both ``mean(q)`` and ``mean(q²)`` over the 9 cells (Option A mean-scale).
-        ``std = (var + 1e-6).sqrt()``. Static gather via ``HOUSE_CELL_IDX``.
+        ``flat q_h`` is the 9×9 claim matrix flattened (81); plus ``mean(q)`` /
+        ``mean(q²)`` over the 9 cells. Drop ``std(x)``. Static gather via
+        ``HOUSE_CELL_IDX``.
         """
         # x_cells: (B, 27, 9, D)
         x_h = x[:, house_cell_idx]
         mean = x_h.mean(dim=2)
-        var = x_h.var(dim=2, unbiased=False)
-        std = (var + 1e-6).sqrt()
         p9 = poles[:, :N_DIGITS]  # (9, 9)
         q = F.relu(x[..., :N_DIGITS] @ p9.T)  # (B, 81, 9)
         q_h = q[:, house_cell_idx]  # (B, 27, 9, 9)
+        q_flat = q_h.reshape(q_h.shape[0], q_h.shape[1], N_DIGITS * N_DIGITS)
         q_mean = q_h.mean(dim=2)
         q_sq_mean = (q_h * q_h).mean(dim=2)
-        return torch.cat([mean, std, q_mean, q_sq_mean], dim=-1)
+        return torch.cat([mean, q_flat, q_mean, q_sq_mean], dim=-1)
+
+    def omega_alpha(
+        self,
+        x: Tensor,
+        y: Tensor,
+        poles: Tensor,
+        house_cell_idx: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """House ``(ω, α)`` each ``(B, 27, M)`` from ``[house_feats(x), y_emb]``."""
+        feat = self.house_features(x, poles, house_cell_idx)
+        y_emb = clifford_embed(y)
+        raw = self.vf_y(torch.cat([feat, y_emb], dim=-1))
+        omega, alpha = raw.split(self.m, dim=-1)
+        return omega, alpha
 
     def omega(
         self,
@@ -88,10 +110,9 @@ class CoupledVectorField(nn.Module):
         poles: Tensor,
         house_cell_idx: Tensor,
     ) -> Tensor:
-        """House angular velocity ``(B, 27, M)`` from ``[house_feats(x), y_emb]``."""
-        feat = self.house_features(x, poles, house_cell_idx)
-        y_emb = clifford_embed(y)
-        return self.vf_y(torch.cat([feat, y_emb], dim=-1))
+        """House angular velocity ``(B, 27, M)`` (compat; prefer ``omega_alpha``)."""
+        omega, _ = self.omega_alpha(x, y, poles, house_cell_idx)
+        return omega
 
     def ambient_u(
         self,

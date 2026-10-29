@@ -139,9 +139,13 @@ def test_constant_house_batch_no_nan() -> None:
 def test_bipartite_param_count_target() -> None:
     model = BipartiteSnTmSolver()
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    assert abs(n - 681_441) <= 1, f'n_params={n} expected ≈681441'
+    # A2 gated+slot: in_y 178→195 (+5440) + vf_y out 16→32 (+5136) = 692017
+    assert abs(n - 692_017) <= 1, f'n_params={n} expected ≈692017'
     assert 600_000 <= n <= 700_000, f'n_params={n} outside 0.60–0.70M'
     assert model.logit_scale.item() == 4.0
+    last = model.vf.vf_y[-1]
+    assert last.out_features == 2 * M
+    assert torch.allclose(last.bias[M:], torch.full((M,), 2.0))
 
 
 def test_build_solver_bipartite_and_resolve() -> None:
@@ -180,8 +184,8 @@ def test_logits_unnormalized_matches_raw_dot() -> None:
     assert not torch.allclose(got, sliced, atol=1e-3)
 
 
-def test_house_features_relu_mean_scale() -> None:
-    """Option A: keep relu(q); claim moments are mean(q) / mean(q²), not sum."""
+def test_house_features_slot_claims() -> None:
+    """Slot claims: [mean(x)64 | flat q_h 81 | mean(q)9 | mean(q²)9]; drop std; in_y=195."""
     from riemannian_sudoku.coupled_vf import CoupledVectorField
 
     torch.manual_seed(4)
@@ -190,23 +194,47 @@ def test_house_features_relu_mean_scale() -> None:
     h_idx = house_cell_idx()
     x = F.normalize(torch.randn(2, 81, D), dim=-1)
     feat = vf.house_features(x, poles, h_idx)
-    assert feat.shape == (2, 27, 2 * D + 2 * N_DIGITS)
+    assert feat.shape == (2, 27, D + N_DIGITS * N_DIGITS + 2 * N_DIGITS)
     q = F.relu(x[..., :N_DIGITS] @ poles[:, :N_DIGITS].T)
     q_h = q[:, h_idx]
     expected = torch.cat(
         [
             x[:, h_idx].mean(dim=2),
-            (x[:, h_idx].var(dim=2, unbiased=False) + 1e-6).sqrt(),
+            q_h.reshape(2, 27, N_DIGITS * N_DIGITS),
             q_h.mean(dim=2),
             (q_h * q_h).mean(dim=2),
         ],
         dim=-1,
     )
     assert torch.allclose(feat, expected, atol=1e-6)
-    # Mean ≠ sum when house not identically zero
-    assert not torch.allclose(q_h.mean(dim=2), q_h.sum(dim=2), atol=1e-3)
-    # in_y stays 178 (zero-param scale)
     emb_m = 2 * M
-    in_y = 2 * D + 2 * N_DIGITS + emb_m
-    assert in_y == 178
-    assert vf.vf_y[0].in_features == 178
+    in_y = D + N_DIGITS * N_DIGITS + 2 * N_DIGITS + emb_m
+    assert in_y == 195
+    assert vf.vf_y[0].in_features == 195
+    assert vf.vf_y[-1].out_features == 2 * M
+
+
+def test_gated_torus_anchored_update() -> None:
+    """y ← y0 + σ(α)⊙(y−y0) + ω; σ→0 → y0; σ→1 → y+ω; α bias +2 → σ≈0.88."""
+    import math
+
+    from riemannian_sudoku.geodesic import gated_torus_step
+
+    y0 = math.pi / 4
+    y = torch.full((2, 27, M), 1.0)
+    omega = torch.zeros(2, 27, M)
+    # Gate off → reset to y0
+    alpha_off = torch.full((2, 27, M), -20.0)
+    got = gated_torus_step(y, omega, alpha_off)
+    assert torch.allclose(got, torch.full_like(y, y0), atol=1e-5)
+    # Gate on → y + ω
+    alpha_on = torch.full((2, 27, M), 20.0)
+    omega2 = torch.ones(2, 27, M) * 0.1
+    got2 = gated_torus_step(y, omega2, alpha_on)
+    assert torch.allclose(got2, y + omega2, atol=1e-5)
+    # Init α bias +2 → mean σ ≈ sigmoid(2) ≈ 0.8808
+    model = BipartiteSnTmSolver(num_steps=1)
+    puzzle = torch.zeros(2, 81, dtype=torch.long)
+    out = model(puzzle)
+    assert 'gate_mean' in out
+    assert 0.85 < float(out['gate_mean']) < 0.92
