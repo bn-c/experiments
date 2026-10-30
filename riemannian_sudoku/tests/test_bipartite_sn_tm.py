@@ -301,3 +301,47 @@ def test_build_solver_terminal_window_and_brake() -> None:
     assert m.supervise_terminal_window == 4
     assert m.omega_weight == 0.15
     assert not m.supervise_all_steps
+
+
+def test_eval_damp_eta_schedule() -> None:
+    """η=1 for k≤start; β and γ compose for k>start; default attrs off."""
+    m = BipartiteSnTmSolver(num_steps=2)
+    assert m._eval_damp_eta(1) == 1.0
+    assert m._eval_damp_eta(16) == 1.0
+    assert m._eval_damp_eta(17) == 1.0  # β=0, γ=1 → inactive
+    m.eval_damp_beta = 1.0
+    assert abs(m._eval_damp_eta(17) - 0.5) < 1e-12  # 1/(1+1·1)
+    assert abs(m._eval_damp_eta(18) - 1.0 / 3.0) < 1e-12
+    m.eval_damp_beta = 0.0
+    m.eval_damp_gamma = 0.5
+    assert abs(m._eval_damp_eta(17) - 0.5) < 1e-12
+    assert abs(m._eval_damp_eta(18) - 0.25) < 1e-12
+    m.eval_damp_beta = 1.0
+    m.eval_damp_gamma = 0.5
+    assert abs(m._eval_damp_eta(17) - 0.25) < 1e-12  # 0.5 · 0.5
+
+
+def test_eval_damp_changes_trajectory_past_start() -> None:
+    """Damping ω after start changes final x when K>start; inactive for K≤start."""
+    torch.manual_seed(9)
+    puzzle = torch.randint(0, 10, (2, 81))
+    base = BipartiteSnTmSolver(num_steps=20)
+    damp = BipartiteSnTmSolver(num_steps=20)
+    with torch.no_grad():
+        damp.load_state_dict(base.state_dict())
+    damp.eval_damp_start = 16
+    damp.eval_damp_beta = 1.0
+    with torch.no_grad():
+        a = base(puzzle)
+        b = damp(puzzle)
+    assert not torch.allclose(a['x'], b['x'], atol=1e-5)
+    # K≤start: damp must be a no-op.
+    short = BipartiteSnTmSolver(num_steps=16)
+    short_d = BipartiteSnTmSolver(num_steps=16)
+    with torch.no_grad():
+        short_d.load_state_dict(short.state_dict())
+    short_d.eval_damp_beta = 1.0
+    with torch.no_grad():
+        c = short(puzzle)
+        d = short_d(puzzle)
+    assert torch.allclose(c['x'], d['x'], atol=1e-6)

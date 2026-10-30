@@ -96,6 +96,28 @@ class BipartiteSnTmSolver(nn.Module):
         self.register_buffer('house_cell_idx', house_cell_idx(), persistent=True)
         self.register_buffer('cell_house_idx', cell_house_idx(), persistent=True)
 
+        # Eval-only post-horizon damp (not in state_dict; keval hook sets these).
+        # For 1-based step k > eval_damp_start:
+        #   η = 1/(1+β(k-start)) · γ^(k-start) on ω_y, ω_z, and optionally u_c.
+        # Leaves u_x / S^8 undamped so x can settle to the nearest ETF pole.
+        self.eval_damp_start = 16
+        self.eval_damp_beta = 0.0
+        self.eval_damp_gamma = 1.0
+        self.eval_damp_uc = False
+
+    def _eval_damp_eta(self, k: int) -> float:
+        """Scalar damp η for 1-based step ``k``; 1.0 when inactive or k≤start."""
+        start = int(self.eval_damp_start)
+        if k <= start:
+            return 1.0
+        t = k - start
+        beta = float(self.eval_damp_beta)
+        gamma = float(self.eval_damp_gamma)
+        eta = 1.0 / (1.0 + beta * t) if beta > 0.0 else 1.0
+        if gamma != 1.0:
+            eta *= gamma**t
+        return float(eta)
+
     def _logits(self, x: Tensor) -> Tensor:
         # x is already unit-norm on S^8 — no slice-normalization.
         scale = self.logit_scale.clamp(max=LOGIT_SCALE_MAX)
@@ -132,8 +154,13 @@ class BipartiteSnTmSolver(nn.Module):
         states: list[Tensor] = []
         u_xs: list[Tensor] = []
         u_cs: list[Tensor] = []
-        for _ in range(self.num_steps):
+        for step_i in range(self.num_steps):
+            eta = self._eval_damp_eta(step_i + 1)
             omega_y, omega_z = self.vf.omega(x, c, y, z, self.house_cell_idx)
+            if eta != 1.0:
+                omega_y = omega_y * eta
+                if omega_z is not None:
+                    omega_z = omega_z * eta
             omegas.append(omega_y)
             omega_zs.append(omega_z)
             y = torus_step(y, omega_y)
@@ -142,6 +169,9 @@ class BipartiteSnTmSolver(nn.Module):
             u_x, u_c = self.vf.ambient_u(
                 x, c, y, z, self.pe, is_clue, self.cell_house_idx
             )
+            # Optional u_c damp; never damp u_x (S^8 settles to ETF pole).
+            if eta != 1.0 and self.eval_damp_uc:
+                u_c = u_c * eta
             u_xs.append(u_x)
             u_cs.append(u_c)
             x = geodesic_step(x, u_x, x0, is_clue)

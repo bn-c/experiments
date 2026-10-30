@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Post-hoc K_eval on the same train/val split as a cooled desk run."""
+"""Post-hoc K_eval on the same train/val split as a cooled desk run.
+
+Optional eval-only damp for steps k > --damp-start:
+  η_k = 1/(1+β(k-start)) · γ^(k-start) on ω_y, ω_z (and optionally u_c).
+Does not retrain; leaves u_x / S^8 undamped.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,14 @@ def main() -> int:
     p.add_argument('--val-size', type=int, default=2048)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--batch-size', type=int, default=128)
+    p.add_argument('--damp-start', type=int, default=16, help='Damp for 1-based k > start')
+    p.add_argument('--damp-beta', type=float, default=0.0, help='η = 1/(1+β(k-start))')
+    p.add_argument('--damp-gamma', type=float, default=1.0, help='extra γ^(k-start); 1=off')
+    p.add_argument(
+        '--damp-uc',
+        action='store_true',
+        help='Also damp u_c (S^{54}); never damps u_x',
+    )
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -39,6 +52,10 @@ def main() -> int:
     print(f'CKPT={args.checkpoint}')
     print(f'USE_GLOBAL_TORUS={int(use_global_torus)}')
     print(f'VAL_N={len(val_df)}')
+    print(
+        f'DAMP_START={args.damp_start} BETA={args.damp_beta} '
+        f'GAMMA={args.damp_gamma} UC={int(args.damp_uc)}'
+    )
     for k in args.ks:
         model = build_solver(
             'bipartite_sn_tm',
@@ -47,6 +64,10 @@ def main() -> int:
             use_global_torus=use_global_torus,
         )
         model.load_state_dict(ckpt['model'])
+        model.eval_damp_start = int(args.damp_start)
+        model.eval_damp_beta = float(args.damp_beta)
+        model.eval_damp_gamma = float(args.damp_gamma)
+        model.eval_damp_uc = bool(args.damp_uc)
         model.to(device)
         m = evaluate(model, loader, device)
         print(
