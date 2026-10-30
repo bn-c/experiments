@@ -65,7 +65,7 @@ class CoupledVectorField(nn.Module):
         """
         Per-house ``(B, 27, 2D+18)``: mean+std of cell ``x`` + claim sums.
 
-        ``q = relu(normalize(x_{:9}) P_{:9}^T)`` (same slice-norm as readout);
+        ``q = relu(x_{:9} P_{:9}^T)`` (unnormalized; near-``e_8`` blanks stay ``q≈0``);
         both ``∑q`` and ``∑q²`` over the 9 cells.
         ``std = (var + 1e-6).sqrt()``. Static gather via ``HOUSE_CELL_IDX``.
         """
@@ -75,8 +75,7 @@ class CoupledVectorField(nn.Module):
         var = x_h.var(dim=2, unbiased=False)
         std = (var + 1e-6).sqrt()
         p9 = poles[:, :N_DIGITS]  # (9, 9)
-        x9 = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
-        q = F.relu(x9 @ p9.T)  # (B, 81, 9)
+        q = F.relu(x[..., :N_DIGITS] @ p9.T)  # (B, 81, 9)
         q_h = q[:, house_cell_idx]  # (B, 27, 9, 9)
         sum_q = q_h.sum(dim=2)
         sum_q2 = q_h.square().sum(dim=2)

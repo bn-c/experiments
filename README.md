@@ -77,6 +77,8 @@ python scripts/visualize_drf.py --video samples/sample.mp4 --max-frames 30
 nor any checkpoints; point `--image`/`--video` at your own files (or drop them into
 `samples/`).
 
+**Hugging Face datasets:** desk uses the default hub cache (`~/.cache/huggingface` when `HF_HOME` / `HF_HUB_CACHE` are unset). Keep `datasets--*` entries; repo cleanup does not prune HF dataset cache.
+
 ## Structured filters on a foveated manifold (prototype)
 
 [fracsrf/manifold.py](fracsrf/manifold.py) combines FracSRF's analytic kernels with

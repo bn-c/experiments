@@ -140,7 +140,7 @@ def test_bipartite_param_count_target() -> None:
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert abs(n - 681_441) <= 1, f'n_params={n} expected ≈681441'
     assert 600_000 <= n <= 700_000, f'n_params={n} outside 0.60–0.70M'
-    assert model.logit_scale.item() == 12.0
+    assert model.logit_scale.item() == 4.0
 
 
 def test_build_solver_bipartite_and_resolve() -> None:
