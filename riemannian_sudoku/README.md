@@ -16,11 +16,9 @@ Tip 10k desk: W&B **`f7fv0ymk`** (blank@10k val **0.5375**). High-K test exact p
 Historical single-sphere blank bar: `yr1h706t` y0-logit (**0.5479** blank@8) —
 higher blank@8, weaker high-K exact. Tip prioritizes product chart + high-K climb.
 
-**Legacy mixers still in CLI** (resume / comparison): `euclid_axial`, `cross_coupled`,
-`geo_*`.
-
-**Superseded arms** (A2 \(S^{63}\), dendritic, y0-logit desks, Gram-era product
-ladders, etc.) live on **closed** `origin/cursor/*` PR branches — not on `main`.
+**Superseded arms** (A2 \(S^{63}\), dendritic, y0-logit, Gram-era product, geo\_*,
+cross\_coupled desks, etc.) live on **closed** `origin/cursor/*` PR branches —
+not on `main`. Tip tree is product-chart only.
 
 Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache;
 do not delete `~/.cache/huggingface` dataset snapshots).

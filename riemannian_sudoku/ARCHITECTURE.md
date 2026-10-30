@@ -120,4 +120,5 @@ Hazard-locked Exp; `x0`/`is_clue` optional (skip freeze when omitted). Tip freez
 - Full train: [`scripts/full_train.sh`](scripts/full_train.sh)
 - Post-hoc K sweep: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)
 
-Superseded A2 / Gram / Phase-1 desks: closed `origin/cursor/*` branches only (not on `main`).
+Superseded A2 / Gram / Phase-1 / geo / cross desks: closed `origin/cursor/*`
+branches only (not on `main`). No legacy-mixer resume scripts on tip.
