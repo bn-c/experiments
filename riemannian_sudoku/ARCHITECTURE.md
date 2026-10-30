@@ -24,6 +24,13 @@
 Historical blank@8 bar: `yr1h706t` y0-logit (**0.5479**). Tip success = high-K exact
 climb without a K=64 crash; blank@8 is secondary.
 
+### Tip K=16 final-CE ablation (`d6ffqu57`, partial 50k)
+
+Same tip weights recipe, **train K=16**, **final-step CE** (no `--supervise-all-steps`),
+user-stopped ~38k. best blank **0.5861** @ step **35500** (K_eval=16). High-K
+zeroshot collapses (blank≈0.21 / exact=0 for K≥64). **Not a tip replacement** —
+keeps blank@16 local max only. Desk: `scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`.
+
 ---
 
 ## 1. What the model is
@@ -117,8 +124,10 @@ Hazard-locked Exp; `x0`/`is_clue` optional (skip freeze when omitted). Tip freez
 ## 6. Desk scripts
 
 - Tip 10k: [`scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh`](scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh)
+- Tip K16 final-CE 50k: [`scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`](scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh)
 - Full train: [`scripts/full_train.sh`](scripts/full_train.sh)
-- Post-hoc K sweep: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)
+- Post-hoc K_eval: [`scripts/bipartite_sn_tm_keval.py`](scripts/bipartite_sn_tm_keval.py)
+- Post-hoc solved strat: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)
 
 Superseded A2 / Gram / Phase-1 / geo / cross desks: closed `origin/cursor/*`
 branches only (not on `main`). No legacy-mixer resume scripts on tip.
