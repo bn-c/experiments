@@ -44,12 +44,18 @@ promote** (tip `f7fv0ymk` keeps high-K exact).
 
 ### Tip K=32 landing-window CE + kinetic (50k)
 
-Same tip chart, **K=32**, CE only on \(k\in\{29..32\}\) (`--supervise-terminal-window 4`),
-plus landing-window kinetic
-\(\mathcal{L}_{\mathrm{kin}}=\lambda_{\mathrm{kin}}\sum_{k=K-3}^{K}(\|\omega_{y,k}\|^2+\|\omega_{z,k}\|^2+\|v_{c,k}\|^2)\)
-with \(\lambda_{\mathrm{kin}}=0.15\) (no \(v_x\); digits settle via CE). Desk cooled 50k
-compile-on: `scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh`. W&B
-`bipartite-sn-tm-tip-landing-kin-k32-s50000`. Undamped K_eval vs `ca48ruu4`.
+Same tip chart, **K=32**, CE only on \(k\in\{29..32\}\), plus landing-window kinetic
+(mean-squares; **no** \(v_x\)):
+\[
+\mathcal{L}_{\mathrm{kin}}=\lambda_{\mathrm{kin}}\sum_{k=K-3}^{K}
+\bigl(\|\omega_{y,k}\|^2+\|\omega_{z,k}\|^2+\|v_{c,k}\|^2\bigr),\quad
+\lambda_{\mathrm{kin}}=0.15.
+\]
+**CLI:** `--mixer bipartite_sn_tm --use-global-torus --num-steps 32
+--supervise-terminal-window 4 --gauge-kinetic-weight 0.15 --kinetic-weight 0
+--constraint-weight 0 --compile` (cooled cosine 50k, batch 128, lr≈1.414e-4).
+Desk: `scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh`.
+W&B name `bipartite-sn-tm-tip-landing-kin-k32-s50000`. Undamped K_eval vs `ca48ruu4`.
 
 ---
 
