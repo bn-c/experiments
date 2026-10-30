@@ -1,30 +1,31 @@
 #!/usr/bin/env bash
-# Full desk train after tune lock. Locked hparams + stability protocol (cosine / early-stop / clip).
+# Full desk train — A2 bipartite_sn_tm (PR #64 defaults) + stability protocol.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
 
-# Phase B pass: batch 128 + √LR vs batch-64 baseline; compile mode=default.
 LR="${LR:-1.414213562e-4}"
 NUM_STEPS="${NUM_STEPS:-8}"
 BATCH="${BATCH:-128}"
 STEPS="${STEPS:-50000}"
 TRAIN_SIZE="${TRAIN_SIZE:-100000}"
 VAL_SIZE="${VAL_SIZE:-2048}"
-CKPT_DIR="${CKPT_DIR:-checkpoints/full-stable}"
+MIXER="${MIXER:-bipartite_sn_tm}"
 RESUME="${RESUME:-}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
-EARLY_STOP_DROP="${EARLY_STOP_DROP:-0.15}"
+EARLY_STOP_DROP="${EARLY_STOP_DROP:-0.05}"
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-2}"
-KINETIC_WEIGHT="${KINETIC_WEIGHT:-0.05}"
+KINETIC_WEIGHT="${KINETIC_WEIGHT:-0}"
+GAUGE_KINETIC_WEIGHT="${GAUGE_KINETIC_WEIGHT:-0}"
 CONSTRAINT_WEIGHT="${CONSTRAINT_WEIGHT:-0.0}"
 NO_AUGMENT="${NO_AUGMENT:-0}"
 SUPERVISE_ALL_STEPS="${SUPERVISE_ALL_STEPS:-1}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
-# GPU fidelity: mode=default compile ~1.2× steady (Phase A pass); reduce-overhead unsafe.
 COMPILE="${COMPILE:-1}"
-NAME="${WANDB_NAME:-full-stable-lr${LR}-ns${NUM_STEPS}-b${BATCH}-s${STEPS}}"
+NAME="${WANDB_NAME:-bipartite-a2-y0-logit-s${STEPS}-b${BATCH}}"
+CKPT_ROOT="${CKPT_ROOT:-checkpoints/bipartite-sn-tm-a2-y0-logit-full}"
+CKPT_DIR="${CKPT_DIR:-${CKPT_ROOT}/${NAME}}"
 
 mkdir -p "$CKPT_DIR" logs
 ARGS=(
@@ -37,7 +38,9 @@ ARGS=(
   --early-stop-drop "$EARLY_STOP_DROP"
   --early-stop-patience "$EARLY_STOP_PATIENCE"
   --kinetic-weight "$KINETIC_WEIGHT"
+  --gauge-kinetic-weight "$GAUGE_KINETIC_WEIGHT"
   --constraint-weight "$CONSTRAINT_WEIGHT"
+  --mixer "$MIXER"
   --num-workers "$NUM_WORKERS" --pin-memory
   --eval-every 500 --log-every 50
   --ckpt-every 1000 --ckpt-dir "$CKPT_DIR"
@@ -57,6 +60,6 @@ if [[ "$COMPILE" == "1" ]]; then
   ARGS+=(--compile)
 fi
 
-echo "=== $NAME ==="
+echo "=== $NAME mixer=$MIXER ==="
 # shellcheck disable=SC2068
 uv run riemannian-sudoku ${ARGS[@]} 2>&1 | tee "logs/${NAME}.log"

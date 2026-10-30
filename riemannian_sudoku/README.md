@@ -1,17 +1,22 @@
 # Riemannian Sudoku
 
 Peer spike: Sudoku solver on the positive orthant of \(S^8\) (\(p = s^2\)) with
-an Exp-map + abs-renorm retraction. Default mixer `--mixer euclid_axial` uses
-factorized row/col/box axial attention and fixed Clifford \(T^3\) PE.
-`--mixer cross_coupled` replaces that with a live \(T^2\) (row×col) gauge and a
-shared ambient MLP → per-manifold tangent project → parallel Exp (Method 1+2:
-MLP updates \(g\)). Pass `--no-gauge` only for the cells-only ablation (729 MLP).
-`--mixer geo_karcher` / `geo_log` are cells-only geodesic affinities + 2-step
-Karcher (state←mean, or `v=Log` then Exp).
-`--mixer geo_transformer` is cells-only (no live T²): Linear(s)+e_row+e_col →
-2-layer Transformer → shared SiLU-expand head → tangent/Exp (params O(1) in M).
+an Exp-map + abs-renorm retraction.
 
-Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache).
+## Supported on `main` (desk default)
+
+**Canonical mixer:** `--mixer bipartite_sn_tm` (A2 bipartite \(S^{63}\leftrightarrow T^{32}\)
+with FiLM vf\_x, y0=\(\pi/4\), logit init 4, unnormalized house claims, supervise-all-steps ramp).
+Promoted via PR #64; W&B run name `bipartite-sn-tm-a2-y0-logit-s10000`.
+
+**Legacy mixers still in CLI** (for resume / comparison): `euclid_axial`, `cross_coupled`.
+
+**Superseded variants** (geo\_transformer, geo\_karcher, alternate A2 forks, etc.) live on
+**closed unmerged** `origin/cursor/*` PR branches — not merged to `main`. See agent-store
+ledger `experiment-cleanup-ledger-20261030.md`.
+
+Trains / evaluates on Hugging Face `sapientinc/sudoku-extreme` (desk HF default cache;
+do not delete `~/.cache/huggingface` dataset snapshots).
 
 ```bash
 cd riemannian_sudoku
@@ -19,14 +24,12 @@ uv sync
 uv run pytest
 # smoke
 uv run riemannian-sudoku train --train-size 1024 --val-size 128 --steps 200 --batch-size 32
-# desk tune (LR × num_steps × batch); then full with locked hparams
-bash scripts/desk_tune.sh logs/desk-tune-clean.tsv
-# locked after clean sweep: lr=1e-4, num_steps=8, batch=64
-bash scripts/full_train.sh   # or: LR=1e-4 NUM_STEPS=8 BATCH=64 STEPS=50000 ...
-# resume (mixer is read from ckpt args; pass --mixer only to override)
-uv run riemannian-sudoku train --resume checkpoints/full/last.pt --steps 50000 ...
-# cross_coupled A/B: --mixer cross_coupled  (see scripts/cross_coupled_ab.sh)
+# 10k A2 desk run (locked hparams)
+bash scripts/bipartite_sn_tm_a2_y0_logit_10k.sh
+# full 50k (defaults: bipartite_sn_tm, checkpoints/bipartite-sn-tm-a2-y0-logit-full/…)
+bash scripts/full_train.sh
+# resume (mixer read from ckpt args unless --mixer override)
+uv run riemannian-sudoku train --resume checkpoints/bipartite-sn-tm-a2-y0-logit-10k/bipartite-sn-tm-a2-y0-logit-s10000/last.pt ...
 ```
 
 W&B project: `riemannian-sudoku`. Logs blank / exact-board / row / col / box on train+val.
-Desk full-train report lives in the agent-store docs (`riemannian-sudoku-full-train.md`).

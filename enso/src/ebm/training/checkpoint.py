@@ -141,6 +141,17 @@ class CheckpointManager:
             elif entry.metric > self._heap[0].metric:
                 heapq.heapreplace(self._heap, entry)
 
+    def prune_orphan_epoch_checkpoints(self) -> None:
+        """Remove epoch checkpoints on disk that are not in the top-K heap."""
+        if not self.checkpoint_dir.is_dir():
+            return
+        keep = {entry.path.resolve() for entry in self._heap}
+        for path in self.checkpoint_dir.glob('checkpoint_epoch*.pt'):
+            if path.resolve() in keep:
+                continue
+            path.unlink(missing_ok=True)
+            logger.debug('Removed orphan checkpoint %s', path.name)
+
     @property
     def best_path(self) -> Path | None:
         """Return the path of the highest-accuracy checkpoint, or None if empty."""
