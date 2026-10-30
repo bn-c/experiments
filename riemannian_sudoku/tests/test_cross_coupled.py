@@ -173,8 +173,8 @@ def test_resolve_mixer_ckpt_cli_roundtrip(tmp_path: Path) -> None:
     """Train/eval resume: ckpt mixer wins when CLI omits --mixer; CLI overrides."""
     from riemannian_sudoku.train import _resolve_use_gauge
 
-    assert _resolve_mixer(None) == 'euclid_axial'
-    assert _resolve_mixer(None, {}) == 'euclid_axial'
+    assert _resolve_mixer(None) == 'bipartite_sn_tm'
+    assert _resolve_mixer(None, {}) == 'bipartite_sn_tm'
     assert _resolve_mixer(None, {'mixer': 'cross_coupled'}) == 'cross_coupled'
     assert _resolve_mixer('euclid_axial', {'mixer': 'cross_coupled'}) == 'euclid_axial'
     assert _resolve_mixer('cross_coupled', {'mixer': 'euclid_axial'}) == 'cross_coupled'

@@ -1,4 +1,4 @@
-"""Locked geodesic step on ``S^{D-1}`` for bipartite Sn–Tm (hazard order)."""
+"""Locked geodesic step on spheres for bipartite Sn–Tm (hazard order)."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ _EPS_NORM = 1e-12
 def geodesic_step(
     x: Tensor,
     u: Tensor,
-    x0: Tensor,
-    is_clue: Tensor,
+    x0: Tensor | None = None,
+    is_clue: Tensor | None = None,
     *,
     delta_max: float = _DELTA_MAX,
 ) -> Tensor:
@@ -30,7 +30,7 @@ def geodesic_step(
       (4) ``v_c = v · θ / ||v||``
       (5) ``cosθ x + sinc(θ/π) v_c``
       (6) normalize
-      (7) ``where(is_clue, x0, ·)``
+      (7) ``where(is_clue, x0, ·)`` if both ``x0`` and ``is_clue`` are provided
     """
     # (1) project ambient u to T_x — no tanh on ambient.
     xu = (x * u).sum(dim=-1, keepdim=True)
@@ -45,8 +45,10 @@ def geodesic_step(
     y = torch.cos(theta) * x + torch.sinc(theta / math.pi) * v_c
     # (6)
     y = F.normalize(y, dim=-1, eps=1e-6)
-    # (7) clue freeze to init poles
-    return torch.where(is_clue.unsqueeze(-1), x0, y)
+    # (7) optional clue freeze to init poles
+    if x0 is not None and is_clue is not None:
+        return torch.where(is_clue.unsqueeze(-1), x0, y)
+    return y
 
 
 def torus_step(y: Tensor, omega: Tensor) -> Tensor:

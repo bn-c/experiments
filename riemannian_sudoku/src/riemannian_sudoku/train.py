@@ -31,12 +31,24 @@ def _resolve_device() -> torch.device:
 
 
 def _resolve_mixer(cli_mixer: str | None, ckpt_args: dict | None = None) -> str:
-    """CLI override wins; else ckpt ``args.mixer``; else ``euclid_axial``."""
+    """CLI override wins; else ckpt ``args.mixer``; else tip ``bipartite_sn_tm``."""
     if cli_mixer:
         return cli_mixer
     if ckpt_args:
-        return str(ckpt_args.get('mixer', 'euclid_axial'))
-    return 'euclid_axial'
+        return str(ckpt_args.get('mixer', 'bipartite_sn_tm'))
+    return 'bipartite_sn_tm'
+
+
+def _resolve_use_global_torus(
+    cli_value: bool | None,
+    ckpt_args: dict | None = None,
+) -> bool:
+    """CLI wins when set; else ckpt; else tip default ``True`` (Phase-2 global T^{16})."""
+    if cli_value is not None:
+        return bool(cli_value)
+    if ckpt_args is not None and 'use_global_torus' in ckpt_args:
+        return bool(ckpt_args['use_global_torus'])
+    return True
 
 
 def _resolve_use_gauge(cli_no_gauge: bool, ckpt_args: dict | None = None) -> bool:
@@ -193,6 +205,7 @@ def _save_ckpt(
                 'mlp_activation': args.mlp_activation,
                 'mlp_layers': args.mlp_layers,
                 'mlp_width': args.mlp_width,
+                'use_global_torus': bool(getattr(args, 'use_global_torus', True)),
             },
         },
         path,
@@ -254,6 +267,9 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     args.mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
+    args.use_global_torus = _resolve_use_global_torus(
+        getattr(args, 'use_global_torus', None), ckpt_args
+    )
 
     model = build_solver(
         args.mixer,
@@ -269,6 +285,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         mlp_activation=args.mlp_activation,
         mlp_layers=args.mlp_layers,
         mlp_width=args.mlp_width,
+        use_global_torus=bool(args.use_global_torus),
     ).to(device)
     args.mlp_layers = int(getattr(model, 'mlp_layers', 1))
     args.mlp_width = str(getattr(model, 'mlp_width', 'default'))
@@ -430,6 +447,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         for key, wandb_key in (
             ('omega_sq_1', 'train/omega_sq_1'),
             ('omega_sq_k', 'train/omega_sq_k'),
+            ('omega_z_sq_1', 'train/omega_z_sq_1'),
+            ('omega_z_sq_k', 'train/omega_z_sq_k'),
             ('scratch_energy', 'train/scratch_energy'),
             ('blank_np', 'train/blank_np'),
             ('claim_energy', 'train/claim_energy'),
@@ -615,6 +634,12 @@ def eval_cmd(args: argparse.Namespace) -> None:
     mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
     mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
+    # Infer from weights when older ckpts omitted the flag.
+    cli_ugt = getattr(args, 'use_global_torus', None)
+    if cli_ugt is None and 'use_global_torus' not in ckpt_args:
+        if any(k.startswith('vf.vf_z.') for k in ckpt['model']):
+            cli_ugt = True
+    use_global_torus = _resolve_use_global_torus(cli_ugt, ckpt_args)
     model = build_solver(
         mixer,
         d_model=args.d_model,
@@ -627,6 +652,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
         mlp_width=mlp_width,
         gauge_kinetic_weight=float(ckpt_args.get('gauge_kinetic_weight', 0.0)),
         supervise_all_steps=bool(ckpt_args.get('supervise_all_steps', False)),
+        use_global_torus=use_global_torus,
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -711,6 +737,15 @@ def main() -> None:
         help='Average blank NLL over ODE steps (default: final state only)',
     )
     t.add_argument(
+        '--use-global-torus',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            'bipartite_sn_tm: global board T^{16} (Phase-2 tip). '
+            'Default True; --no-use-global-torus for Phase-1; on --resume reads ckpt unless set'
+        ),
+    )
+    t.add_argument(
         '--mixer',
         type=str,
         default=None,
@@ -722,7 +757,7 @@ def main() -> None:
             'geo_transformer',
             'bipartite_sn_tm',
         ],
-        help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
+        help='velocity mixer (default bipartite_sn_tm; on --resume reads ckpt args unless set)',
     )
     t.add_argument(
         '--no-gauge',
@@ -802,6 +837,12 @@ def main() -> None:
         '--no-gauge',
         action='store_true',
         help='force cells-only (omit live T²); default reads ckpt args',
+    )
+    e.add_argument(
+        '--use-global-torus',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='bipartite_sn_tm: global T^{16}; default reads ckpt (tip True)',
     )
     e.add_argument(
         '--mlp-activation',

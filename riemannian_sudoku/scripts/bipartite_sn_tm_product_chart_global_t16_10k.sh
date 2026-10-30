@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# A2 Priority 2: FiLM vf_x (H_X=432) + cooled 10k + --supervise-all-steps.
-# Same recipe as bipartite_sn_tm_a2_supervise_ramp_10k.sh; W&B bipartite-sn-tm-a2-film-vx-s10000.
+# Phase 2 + S^8 chart (w_x_chart) + clue-anchored c on S^{54}.
+# Product S^8 × S^{54} + global T^{16}; Gram→[μ/σ φ]; H_Y=304 H_Z=96 H_X=412 (~681.9k).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
@@ -16,18 +16,17 @@ EVAL_EVERY="${EVAL_EVERY:-500}"
 SEED="${SEED:-42}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
-mkdir -p logs checkpoints/bipartite-sn-tm-a2-film-vx-10k
-NAME="bipartite-sn-tm-a2-film-vx-s${STEPS}"
-CKPT="checkpoints/bipartite-sn-tm-a2-film-vx-10k/${NAME}"
+mkdir -p logs checkpoints/bipartite-sn-tm-product-chart-global-t16-10k
+NAME="bipartite-sn-tm-product-chart-global-t16-s${STEPS}"
+CKPT="checkpoints/bipartite-sn-tm-product-chart-global-t16-10k/${NAME}"
 LOG="logs/${NAME}.log"
 SUMMARY="logs/${NAME}-summary.txt"
 mkdir -p "$CKPT"
 
 {
-  echo "BASELINE_P1=blank@10k=0.542 n_params=670993 run=4jkyua1z ramp+slice-norm"
-  echo "BASELINE_A2=blank@10k=0.5418 n_params=670993 run=ul0rthe2 final-CE"
-  echo "BASELINE_G=geo_transformer blank@10k=0.512 n_params=501257 run=6rp4e5u4"
-  echo "ARM=bipartite_sn_tm_A2 FiLM_vf_x H_X=432 supervise_all_steps=ramp slice_norm_claims K=${NUM_STEPS}"
+  echo "BASELINE_Y0_LOGIT=blank@10k=0.5479 n_params=681441 run=yr1h706t K=8"
+  echo "BASELINE_PHASE2_GRAM=product S8xS54 + T16_global Gram36 (prior Phase 2)"
+  echo "ARM=bipartite_sn_tm_product S8xS54 + T16_global + w_x_chart + clue_c_anchor H_Y=304 H_Z=96 H_X=412 supervise_all_steps=ramp K=${NUM_STEPS}"
   echo "CE_GAMMA=0.9 BATCH=${BATCH} LR=${LR} SEED=${SEED} VAL=${VAL_SIZE} COMPILE=1"
   echo "----"
 } | tee "$SUMMARY"
@@ -46,6 +45,7 @@ uv run riemannian-sudoku train \
   --ckpt-every 1000 --num-workers 4 --pin-memory \
   --seed "$SEED" \
   --mixer bipartite_sn_tm \
+  --use-global-torus \
   --compile \
   --supervise-all-steps \
   --ckpt-dir "$CKPT" --wandb-name "$NAME" \
