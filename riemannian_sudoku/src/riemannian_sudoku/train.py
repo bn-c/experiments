@@ -199,6 +199,9 @@ def _save_ckpt(
                 'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
+                'supervise_terminal_window': int(
+                    getattr(args, 'supervise_terminal_window', 0)
+                ),
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
@@ -281,6 +284,7 @@ def train_cmd(args: argparse.Namespace) -> None:
         gauge_kinetic_weight=args.gauge_kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
+        supervise_terminal_window=int(getattr(args, 'supervise_terminal_window', 0)),
         use_gauge=args.use_gauge,
         mlp_activation=args.mlp_activation,
         mlp_layers=args.mlp_layers,
@@ -373,6 +377,9 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
+                'supervise_terminal_window': int(
+                    getattr(args, 'supervise_terminal_window', 0)
+                ),
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
                 'use_gauge': args.use_gauge,
@@ -449,6 +456,9 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('omega_sq_k', 'train/omega_sq_k'),
             ('omega_z_sq_1', 'train/omega_z_sq_1'),
             ('omega_z_sq_k', 'train/omega_z_sq_k'),
+            ('v_x_sq_k', 'train/v_x_sq_k'),
+            ('v_c_sq_k', 'train/v_c_sq_k'),
+            ('brake_loss', 'train/brake'),
             ('scratch_energy', 'train/scratch_energy'),
             ('blank_np', 'train/blank_np'),
             ('claim_energy', 'train/claim_energy'),
@@ -652,6 +662,7 @@ def eval_cmd(args: argparse.Namespace) -> None:
         mlp_width=mlp_width,
         gauge_kinetic_weight=float(ckpt_args.get('gauge_kinetic_weight', 0.0)),
         supervise_all_steps=bool(ckpt_args.get('supervise_all_steps', False)),
+        supervise_terminal_window=int(ckpt_args.get('supervise_terminal_window', 0)),
         use_global_torus=use_global_torus,
     )
     model.load_state_dict(ckpt['model'])
@@ -728,13 +739,25 @@ def main() -> None:
         '--gauge-kinetic-weight',
         type=float,
         default=0.0,
-        help='λ_g on final-step gauge velocity energy (cross_coupled only; 0=off, axial unchanged)',
+        help=(
+            'λ_g / λ_brake: cross_coupled gauge kinetic; bipartite_sn_tm terminal velocity '
+            'brake λ(‖ω_y,K‖²+‖ω_z,K‖²+‖v_x,K‖²+‖v_c,K‖²) (0=off)'
+        ),
     )
     t.add_argument('--constraint-weight', type=float, default=0.1, help='λ_c on unit-sum MSE')
     t.add_argument(
         '--supervise-all-steps',
         action='store_true',
         help='Average blank NLL over ODE steps (default: final state only)',
+    )
+    t.add_argument(
+        '--supervise-terminal-window',
+        type=int,
+        default=0,
+        help=(
+            'bipartite_sn_tm: blank CE only on last N ODE steps (uniform); '
+            '0=off (final CE or --supervise-all-steps). Overrides --supervise-all-steps when N>0'
+        ),
     )
     t.add_argument(
         '--use-global-torus',

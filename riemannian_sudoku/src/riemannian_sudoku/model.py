@@ -607,6 +607,7 @@ def build_solver(
     gauge_kinetic_weight: float = 0.0,
     constraint_weight: float = 0.1,
     supervise_all_steps: bool = False,
+    supervise_terminal_window: int = 0,
     use_gauge: bool = True,
     mlp_activation: str = 'gelu',
     mlp_layers: int = 1,
@@ -619,8 +620,9 @@ def build_solver(
 
         return BipartiteSnTmSolver(
             num_steps=num_steps,
-            omega_weight=gauge_kinetic_weight,  # λ_ω via --gauge-kinetic-weight
+            omega_weight=gauge_kinetic_weight,  # λ_brake via --gauge-kinetic-weight
             supervise_all_steps=supervise_all_steps,
+            supervise_terminal_window=supervise_terminal_window,
             use_global_torus=use_global_torus,
         )
     return RiemannianSudokuSolver(

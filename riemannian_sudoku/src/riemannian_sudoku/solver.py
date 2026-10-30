@@ -28,6 +28,8 @@ LOGIT_SCALE_INIT = 4.0
 LOGIT_SCALE_MAX = 50.0
 CE_GAMMA = 0.9  # → label_smoothing = 1 - γ
 LAMBDA_OMEGA_DEFAULT = 0.0
+LAMBDA_BRAKE_DEFAULT = 0.0
+SUPERVISE_TERMINAL_WINDOW_DEFAULT = 0
 
 
 class BipartiteSnTmSolver(nn.Module):
@@ -36,6 +38,13 @@ class BipartiteSnTmSolver(nn.Module):
 
     Readout: ``logits = logit_scale · (x @ P^T)`` with unit ``x ∈ S^8`` (no slice-norm).
     Optional global board torus ``z ∈ T^{16}`` via ``use_global_torus``.
+
+    ``supervise_terminal_window=N>0``: blank CE only on last ``N`` steps (uniform);
+    zeros early-step CE (``w_k=0`` for ``k≤K-N``). Takes precedence over
+    ``supervise_all_steps``.
+
+    ``omega_weight`` / λ_brake: terminal velocity brake
+    ``λ(‖ω_y,K‖²+‖ω_z,K‖²+‖v_x,K‖²+‖v_c,K‖²)`` (mean squares).
     """
 
     def __init__(
@@ -48,6 +57,7 @@ class BipartiteSnTmSolver(nn.Module):
         omega_weight: float = LAMBDA_OMEGA_DEFAULT,
         ce_gamma: float = CE_GAMMA,
         supervise_all_steps: bool = False,
+        supervise_terminal_window: int = SUPERVISE_TERMINAL_WINDOW_DEFAULT,
         use_global_torus: bool = True,
     ) -> None:
         super().__init__()
@@ -59,6 +69,7 @@ class BipartiteSnTmSolver(nn.Module):
         self.omega_weight = float(omega_weight)
         self.ce_gamma = float(ce_gamma)
         self.supervise_all_steps = bool(supervise_all_steps)
+        self.supervise_terminal_window = max(0, int(supervise_terminal_window))
         self.use_global_torus = bool(use_global_torus)
         # Compatibility shims for train.py summary fields.
         self.mlp_activation = 'silu'
@@ -91,11 +102,20 @@ class BipartiteSnTmSolver(nn.Module):
 
     def integrate(
         self, puzzle: Tensor
-    ) -> tuple[Tensor, Tensor, list[Tensor], list[Tensor], list[Tensor | None]]:
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        list[Tensor],
+        list[Tensor],
+        list[Tensor | None],
+        Tensor,
+        Tensor,
+    ]:
         """
         Leapfrog ``K`` steps: ω on houses (+ global), then geodesic on ``x`` and ``c``.
 
-        Returns final ``x``, ``c``, per-step ``ω_y``, post-update ``x`` states, per-step ``ω_z``.
+        Returns final ``x``, ``c``, per-step ``ω_y``, post-update ``x`` states, per-step
+        ``ω_z``, and terminal ambient velocities ``(u_x,K, u_c,K)``.
         """
         x, c, y, z, is_clue = init_bipartite_state(
             puzzle,
@@ -109,6 +129,8 @@ class BipartiteSnTmSolver(nn.Module):
         omegas: list[Tensor] = []
         omega_zs: list[Tensor | None] = []
         states: list[Tensor] = []
+        u_x = x.new_zeros(())
+        u_c = c.new_zeros(())
         for _ in range(self.num_steps):
             omega_y, omega_z = self.vf.omega(x, c, y, z, self.house_cell_idx)
             omegas.append(omega_y)
@@ -126,7 +148,7 @@ class BipartiteSnTmSolver(nn.Module):
         self._last_omega_zs = omega_zs
         self._last_is_clue = is_clue
         self._last_c = c
-        return x, c, omegas, states, omega_zs
+        return x, c, omegas, states, omega_zs, u_x, u_c
 
     @staticmethod
     def _blank_ce(logits: Tensor, solution: Tensor, mask: Tensor, label_smoothing: float) -> Tensor:
@@ -152,12 +174,19 @@ class BipartiteSnTmSolver(nn.Module):
         solution: Tensor | None = None,
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        x, c, omegas, states, omega_zs = self.integrate(puzzle)
+        x, c, omegas, states, omega_zs, u_x_k, u_c_k = self.integrate(puzzle)
         logits = self._logits(x)
         pred = logits.argmax(dim=-1) + 1
 
         omega1 = omegas[0]
         omega_k = omegas[-1]
+        omega_y_sq = omega_k.square().mean()
+        v_x_sq = u_x_k.square().mean()
+        v_c_sq = u_c_k.square().mean()
+        if self.use_global_torus and omega_zs[-1] is not None:
+            omega_z_sq = omega_zs[-1].square().mean()
+        else:
+            omega_z_sq = omega_y_sq.new_zeros(())
         # Rest-axis displacement on S^{54} (not ‖c‖² which is constant 1/55).
         scratch_energy = (1.0 - c[..., COORD_REST]).mean()
         blank_np = x[..., BLANK_COORD].square().mean()
@@ -173,7 +202,9 @@ class BipartiteSnTmSolver(nn.Module):
             'pred': pred,
             'velocities': omega_k,
             'omega_sq_1': omega1.square().mean().detach(),
-            'omega_sq_k': omega_k.square().mean().detach(),
+            'omega_sq_k': omega_y_sq.detach(),
+            'v_x_sq_k': v_x_sq.detach(),
+            'v_c_sq_k': v_c_sq.detach(),
             'scratch_energy': scratch_energy.detach(),
             'blank_np': blank_np.detach(),
             'claim_energy': claim_energy.detach(),
@@ -181,7 +212,7 @@ class BipartiteSnTmSolver(nn.Module):
         }
         if self.use_global_torus and omega_zs[0] is not None and omega_zs[-1] is not None:
             out['omega_z_sq_1'] = omega_zs[0].square().mean().detach()
-            out['omega_z_sq_k'] = omega_zs[-1].square().mean().detach()
+            out['omega_z_sq_k'] = omega_z_sq.detach()
 
         if solution is None:
             return out
@@ -189,7 +220,18 @@ class BipartiteSnTmSolver(nn.Module):
         if mask is None:
             mask = (puzzle == 0).float()
         label_smoothing = max(0.0, 1.0 - self.ce_gamma)
-        if self.supervise_all_steps:
+        win = self.supervise_terminal_window
+        if win > 0:
+            # Terminal-window CE: w_k=0 outside last ``win`` steps; uniform inside.
+            n = min(win, len(states))
+            ces = torch.stack(
+                [
+                    self._blank_ce(self._logits(st), solution, mask, label_smoothing)
+                    for st in states[-n:]
+                ]
+            )
+            task_loss = ces.mean()
+        elif self.supervise_all_steps:
             ces = torch.stack(
                 [self._blank_ce(self._logits(st), solution, mask, label_smoothing) for st in states]
             )
@@ -199,15 +241,17 @@ class BipartiteSnTmSolver(nn.Module):
         else:
             task_loss = self._blank_ce(logits, solution, mask, label_smoothing)
 
-        omega_kin = omega_k.square().mean()
-        loss = task_loss + self.omega_weight * omega_kin
+        # Velocity brake: λ(‖ω_y,K‖² + ‖ω_z,K‖² + ‖v_x,K‖² + ‖v_c,K‖²).
+        brake = omega_y_sq + omega_z_sq + v_x_sq + v_c_sq
+        loss = task_loss + self.omega_weight * brake
         out.update(
             {
                 'loss': loss,
                 'task_loss': task_loss.detach(),
-                'kinetic_loss': omega_kin.detach(),
-                'gauge_kinetic_loss': omega_kin.new_zeros(()),
-                'constraint_loss': omega_kin.new_zeros(()),
+                'kinetic_loss': brake.detach(),
+                'brake_loss': brake.detach(),
+                'gauge_kinetic_loss': brake.new_zeros(()),
+                'constraint_loss': brake.new_zeros(()),
             }
         )
         return out
