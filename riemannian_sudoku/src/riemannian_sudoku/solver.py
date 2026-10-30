@@ -1,4 +1,4 @@
-"""Bipartite ``S^{63} ↔ T^{16}`` Sudoku solver (leapfrog Y→X, K steps)."""
+"""Bipartite product ``S^8 × S^{54} ↔ T^{16}`` Sudoku solver (leapfrog Y→X, K steps)."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from riemannian_sudoku.coupled_vf import CoupledVectorField
 from riemannian_sudoku.geodesic import geodesic_step, torus_step
 from riemannian_sudoku.manifold_embed import (
     BLANK_COORD,
-    D,
+    COORD_REST,
+    DECISION_DIM,
     M,
     N_DIGITS,
     PE_ALPHA,
     PE_DIM,
-    SCRATCH_START,
     cell_house_idx,
     house_cell_idx,
     init_bipartite_state,
@@ -32,34 +32,34 @@ LAMBDA_OMEGA_DEFAULT = 0.0
 
 class BipartiteSnTmSolver(nn.Module):
     """
-    Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps.
+    Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps on product cells.
 
-    Readout: ``normalize(x[..., :9])``; ``logits = logit_scale · (x_dec @ P[:, :9].T)``
-    with ``logit_scale`` init 4, clamp ≤50. Train CE with γ=0.9; ``λ_ω=0`` (log only).
+    Readout: ``logits = logit_scale · (x @ P^T)`` with unit ``x ∈ S^8`` (no slice-norm).
+    Optional global board torus ``z ∈ T^{16}`` via ``use_global_torus``.
     """
 
     def __init__(
         self,
         num_steps: int = K_DEFAULT,
-        d: int = D,
         m: int = M,
-        h_y: int = 320,
-        h_x: int = 432,
+        h_y: int | None = None,
+        h_x: int | None = None,
         pe_alpha: float = PE_ALPHA,
         omega_weight: float = LAMBDA_OMEGA_DEFAULT,
         ce_gamma: float = CE_GAMMA,
         supervise_all_steps: bool = False,
+        use_global_torus: bool = True,
     ) -> None:
         super().__init__()
         self.mixer = 'bipartite_sn_tm'
         self.use_gauge = False
         self.num_steps = int(num_steps)
-        self.d = d
         self.m = m
         self.pe_alpha = pe_alpha
         self.omega_weight = float(omega_weight)
         self.ce_gamma = float(ce_gamma)
         self.supervise_all_steps = bool(supervise_all_steps)
+        self.use_global_torus = bool(use_global_torus)
         # Compatibility shims for train.py summary fields.
         self.mlp_activation = 'silu'
         self.mlp_layers = 1
@@ -67,45 +67,66 @@ class BipartiteSnTmSolver(nn.Module):
         self.kinetic_weight = 0.0
         self.gauge_kinetic_weight = 0.0
         self.constraint_weight = 0.0
-        self.d_model = h_x
         self.dt = 1.0
 
-        self.vf = CoupledVectorField(d=d, m=m, h_y=h_y, h_x=h_x, pe_dim=PE_DIM)
+        self.vf = CoupledVectorField(
+            m=m,
+            h_y=h_y,
+            h_x=h_x,
+            pe_dim=PE_DIM,
+            use_global_torus=self.use_global_torus,
+        )
+        self.d_model = self.vf.h_x
         self.logit_scale = nn.Parameter(torch.tensor(float(LOGIT_SCALE_INIT)))
 
-        self.register_buffer('poles', simplex_etf_poles(N_DIGITS, d), persistent=True)
+        self.register_buffer('poles', simplex_etf_poles(N_DIGITS, DECISION_DIM), persistent=True)
         self.register_buffer('pe', torus_t3_pe(PE_DIM), persistent=True)
         self.register_buffer('house_cell_idx', house_cell_idx(), persistent=True)
         self.register_buffer('cell_house_idx', cell_house_idx(), persistent=True)
 
     def _logits(self, x: Tensor) -> Tensor:
-        x_dec = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
+        # x is already unit-norm on S^8 — no slice-normalization.
         scale = self.logit_scale.clamp(max=LOGIT_SCALE_MAX)
-        p9 = self.poles[:, :N_DIGITS]
-        return scale * (x_dec @ p9.T)
+        return scale * (x @ self.poles.T)
 
-    def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+    def integrate(
+        self, puzzle: Tensor
+    ) -> tuple[Tensor, Tensor, list[Tensor], list[Tensor], list[Tensor | None]]:
         """
-        Leapfrog ``K`` steps: ω on houses, then geodesic on cells.
+        Leapfrog ``K`` steps: ω on houses (+ global), then geodesic on ``x`` and ``c``.
 
-        Returns final ``x``, per-step ω list, per-step post-update ``x`` states.
+        Returns final ``x``, ``c``, per-step ``ω_y``, post-update ``x`` states, per-step ``ω_z``.
         """
-        x, y, is_clue = init_bipartite_state(
-            puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
+        x, c, y, z, is_clue = init_bipartite_state(
+            puzzle,
+            self.poles,
+            self.pe,
+            pe_alpha=self.pe_alpha,
+            use_global_torus=self.use_global_torus,
         )
         x0 = x
+        c0 = c  # clue anchors on S^{54}; geodesic_step returns new tensors (no clone)
         omegas: list[Tensor] = []
+        omega_zs: list[Tensor | None] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
-            omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
-            omegas.append(omega)
-            y = torus_step(y, omega)
-            u = self.vf.ambient_u(x, y, self.pe, self.cell_house_idx)
-            x = geodesic_step(x, u, x0, is_clue)
+            omega_y, omega_z = self.vf.omega(x, c, y, z, self.house_cell_idx)
+            omegas.append(omega_y)
+            omega_zs.append(omega_z)
+            y = torus_step(y, omega_y)
+            if z is not None and omega_z is not None:
+                z = torus_step(z, omega_z)
+            u_x, u_c = self.vf.ambient_u(
+                x, c, y, z, self.pe, is_clue, self.cell_house_idx
+            )
+            x = geodesic_step(x, u_x, x0, is_clue)
+            c = geodesic_step(c, u_c, c0, is_clue)
             states.append(x)
         self._last_omegas = omegas
+        self._last_omega_zs = omega_zs
         self._last_is_clue = is_clue
-        return x, omegas, states
+        self._last_c = c
+        return x, c, omegas, states, omega_zs
 
     @staticmethod
     def _blank_ce(logits: Tensor, solution: Tensor, mask: Tensor, label_smoothing: float) -> Tensor:
@@ -131,26 +152,26 @@ class BipartiteSnTmSolver(nn.Module):
         solution: Tensor | None = None,
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        x, omegas, states = self.integrate(puzzle)
+        x, c, omegas, states, omega_zs = self.integrate(puzzle)
         logits = self._logits(x)
         pred = logits.argmax(dim=-1) + 1
 
         omega1 = omegas[0]
         omega_k = omegas[-1]
-        scratch_energy = x[..., SCRATCH_START:].square().mean()
+        # Rest-axis displacement on S^{54} (not ‖c‖² which is constant 1/55).
+        scratch_energy = (1.0 - c[..., COORD_REST]).mean()
         blank_np = x[..., BLANK_COORD].square().mean()
-        # Watch-only: unnormalized claims (matches house_features; not slice-normed like _logits).
-        p9 = self.poles[:, :N_DIGITS]
-        q = F.relu(x[..., :N_DIGITS] @ p9.T)
+        q = F.relu(x @ self.poles.T)
         claim_energy = q.square().mean()
 
         out: dict[str, Tensor] = {
-            's': x,  # train/eval expect 's'; bipartite state is x on S^{63}
+            's': torch.cat([x, c], dim=-1),  # (B,81,64) compat
             'x': x,
+            'c': c,
             'logits': logits,
             'probs': F.softmax(logits, dim=-1),
             'pred': pred,
-            'velocities': omega_k,  # placeholder for kinetic log path
+            'velocities': omega_k,
             'omega_sq_1': omega1.square().mean().detach(),
             'omega_sq_k': omega_k.square().mean().detach(),
             'scratch_energy': scratch_energy.detach(),
@@ -158,6 +179,10 @@ class BipartiteSnTmSolver(nn.Module):
             'claim_energy': claim_energy.detach(),
             'logit_scale': self.logit_scale.detach().clamp(max=LOGIT_SCALE_MAX),
         }
+        if self.use_global_torus and omega_zs[0] is not None and omega_zs[-1] is not None:
+            out['omega_z_sq_1'] = omega_zs[0].square().mean().detach()
+            out['omega_z_sq_k'] = omega_zs[-1].square().mean().detach()
+
         if solution is None:
             return out
 
@@ -168,7 +193,6 @@ class BipartiteSnTmSolver(nn.Module):
             ces = torch.stack(
                 [self._blank_ce(self._logits(st), solution, mask, label_smoothing) for st in states]
             )
-            # Linear ramp: w_k = k / Σj (favor later ODE steps over uniform mean).
             k = ces.shape[0]
             w = torch.arange(1, k + 1, device=ces.device, dtype=ces.dtype)
             task_loss = (ces * w).sum() / w.sum()
@@ -181,7 +205,7 @@ class BipartiteSnTmSolver(nn.Module):
             {
                 'loss': loss,
                 'task_loss': task_loss.detach(),
-                'kinetic_loss': omega_kin.detach(),  # ||ω_K||² (λ_ω may be 0)
+                'kinetic_loss': omega_kin.detach(),
                 'gauge_kinetic_loss': omega_kin.new_zeros(()),
                 'constraint_loss': omega_kin.new_zeros(()),
             }

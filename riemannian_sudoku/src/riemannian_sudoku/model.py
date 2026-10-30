@@ -611,6 +611,7 @@ def build_solver(
     mlp_activation: str = 'gelu',
     mlp_layers: int = 1,
     mlp_width: str = 'default',
+    use_global_torus: bool = True,
 ) -> nn.Module:
     """Factory: ``bipartite_sn_tm`` → ``BipartiteSnTmSolver``; else ``RiemannianSudokuSolver``."""
     if mixer == 'bipartite_sn_tm':
@@ -620,6 +621,7 @@ def build_solver(
             num_steps=num_steps,
             omega_weight=gauge_kinetic_weight,  # λ_ω via --gauge-kinetic-weight
             supervise_all_steps=supervise_all_steps,
+            use_global_torus=use_global_torus,
         )
     return RiemannianSudokuSolver(
         d_model=d_model,
