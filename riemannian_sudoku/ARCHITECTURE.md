@@ -24,6 +24,24 @@
 Historical blank@8 bar: `yr1h706t` y0-logit (**0.5479**). Tip success = high-K exact
 climb without a K=64 crash; blank@8 is secondary.
 
+### Tip K=16 final-CE ablation (`d6ffqu57`, partial 50k)
+
+Same tip weights recipe, **train K=16**, **final-step CE** (no `--supervise-all-steps`),
+user-stopped ~38k. best blank **0.5861** @ step **35500** (K_eval=16). High-K
+zeroshot collapses (blank≈0.21 / exact=0 for K≥64). **Not a tip replacement** —
+keeps blank@16 local max only. Desk: `scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`.
+
+### Tip K=16 terminal-window CE + velocity brake (`ca48ruu4`, 10k)
+
+Same tip chart, **K=16**, CE only on last 4 steps (`--supervise-terminal-window 4`;
+\(w_k=0\) for \(k=1..12\)), plus
+\(\mathcal{L}_{\mathrm{brake}}=\lambda_{\mathrm{brake}}(\|\omega_{y,K}\|^2+\|\omega_{z,K}\|^2+\|v_{x,K}\|^2+\|v_{c,K}\|^2)\)
+with \(\lambda_{\mathrm{brake}}=0.01\) via `--gauge-kinetic-weight`. Desk cooled 10k:
+`scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh`. best blank **0.5685** @K=16;
+K_eval peak blank/exact at K=24 (**0.5726** / **0.098**); K≥64 exact=0 but blank
+floor ~0.29 (vs final-CE ~0.21). Softens overshoot vs `d6ffqu57`; **not a tip
+promote** (tip `f7fv0ymk` keeps high-K exact).
+
 ---
 
 ## 1. What the model is
@@ -107,18 +125,25 @@ Hazard-locked Exp; `x0`/`is_clue` optional (skip freeze when omitted). Tip freez
 
 ## 5. Loss & diagnostics ([`solver.py`](src/riemannian_sudoku/solver.py))
 
-- Blank CE (\(\gamma=0.9\)); optional `--supervise-all-steps` linear ramp.
+- Blank CE (\(\gamma=0.9\)); optional `--supervise-all-steps` linear ramp; optional
+  `--supervise-terminal-window N` (uniform CE on last \(N\) steps only; overrides ramp).
+- Velocity brake: `--gauge-kinetic-weight` → \(\lambda_{\mathrm{brake}}\) on
+  \(\|\omega_{y,K}\|^2+\|\omega_{z,K}\|^2+\|v_{x,K}\|^2+\|v_{c,K}\|^2\) (mean squares).
 - `scratch_energy` = \((1 - c_{\ldots,6}).\mathrm{mean()}\) (rest-axis displacement; **not** \(\|c\|^2\equiv 1/55\)).
 - `blank_np` = mean \(x_8^2\); `claim_energy` = mean \(\mathrm{relu}(x P^\top)^2\) (watch-only).
-- `omega_sq_1` / `omega_sq_k` from **\(\omega_y\)**; tip also `omega_z_sq_*`.
+- `omega_sq_1` / `omega_sq_k` from **\(\omega_y\)**; tip also `omega_z_sq_*`;
+  `v_x_sq_k` / `v_c_sq_k` / `brake_loss` for terminal ambients.
 
 ---
 
 ## 6. Desk scripts
 
 - Tip 10k: [`scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh`](scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh)
+- Tip K16 final-CE 50k: [`scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`](scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh)
+- Tip K16 terminal-window + brake 10k: [`scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh`](scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh)
 - Full train: [`scripts/full_train.sh`](scripts/full_train.sh)
-- Post-hoc K sweep: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)
+- Post-hoc K_eval: [`scripts/bipartite_sn_tm_keval.py`](scripts/bipartite_sn_tm_keval.py)
+- Post-hoc solved strat: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)
 
 Superseded A2 / Gram / Phase-1 / geo / cross desks: closed `origin/cursor/*`
 branches only (not on `main`). No legacy-mixer resume scripts on tip.

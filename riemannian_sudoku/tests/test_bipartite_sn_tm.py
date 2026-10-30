@@ -222,3 +222,59 @@ def test_product_unit_norm_invariant_after_k() -> None:
     out = model(puzzle)
     assert torch.allclose(out['x'].norm(dim=-1), torch.ones(2, 81), atol=1e-4)
     assert torch.allclose(out['c'].norm(dim=-1), torch.ones(2, 81), atol=1e-4)
+
+
+def test_terminal_window_ce_ignores_early_steps() -> None:
+    """CE window last-N only: early states do not change task_loss vs final-only when N=1."""
+    torch.manual_seed(7)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    mask = (puzzle == 0).float()
+    final = BipartiteSnTmSolver(num_steps=4, omega_weight=0.0, supervise_terminal_window=0)
+    win1 = BipartiteSnTmSolver(num_steps=4, omega_weight=0.0, supervise_terminal_window=1)
+    with torch.no_grad():
+        win1.load_state_dict(final.state_dict())
+    a = final(puzzle, solution, mask)
+    b = win1(puzzle, solution, mask)
+    assert torch.allclose(a['task_loss'], b['task_loss'], atol=1e-5)
+    win4 = BipartiteSnTmSolver(num_steps=4, omega_weight=0.0, supervise_terminal_window=4)
+    with torch.no_grad():
+        win4.load_state_dict(final.state_dict())
+    c = win4(puzzle, solution, mask)
+    # Full-window mean CE generally differs from final-only (unless flat trajectory).
+    assert 'brake_loss' in c and torch.isfinite(c['loss'])
+    c['loss'].backward()
+
+
+def test_velocity_brake_adds_lambda_times_four_energies() -> None:
+    """λ_brake multiplies ‖ω_y‖²+‖ω_z‖²+‖v_x‖²+‖v_c‖² into loss."""
+    torch.manual_seed(8)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    off = BipartiteSnTmSolver(num_steps=2, omega_weight=0.0)
+    on = BipartiteSnTmSolver(num_steps=2, omega_weight=0.01)
+    with torch.no_grad():
+        on.load_state_dict(off.state_dict())
+    a = off(puzzle, solution)
+    b = on(puzzle, solution)
+    assert torch.allclose(a['task_loss'], b['task_loss'], atol=1e-6)
+    expected = a['task_loss'] + 0.01 * a['brake_loss']
+    assert torch.allclose(b['loss'], expected, atol=1e-5)
+    # Brake = sum of four mean-squares (ω_z present under tip default).
+    parts = a['omega_sq_k'] + a['omega_z_sq_k'] + a['v_x_sq_k'] + a['v_c_sq_k']
+    assert torch.allclose(a['brake_loss'], parts, atol=1e-6)
+    assert float(a['brake_loss']) > 0.0
+    b['loss'].backward()
+
+
+def test_build_solver_terminal_window_and_brake() -> None:
+    m = build_solver(
+        'bipartite_sn_tm',
+        num_steps=16,
+        gauge_kinetic_weight=0.01,
+        supervise_terminal_window=4,
+    )
+    assert isinstance(m, BipartiteSnTmSolver)
+    assert m.supervise_terminal_window == 4
+    assert m.omega_weight == 0.01
+    assert not m.supervise_all_steps
