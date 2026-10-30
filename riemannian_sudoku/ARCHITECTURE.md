@@ -31,13 +31,16 @@ user-stopped ~38k. best blank **0.5861** @ step **35500** (K_eval=16). High-K
 zeroshot collapses (blank≈0.21 / exact=0 for K≥64). **Not a tip replacement** —
 keeps blank@16 local max only. Desk: `scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`.
 
-### Tip K=16 terminal-window CE + velocity brake
+### Tip K=16 terminal-window CE + velocity brake (`ca48ruu4`, 10k)
 
 Same tip chart, **K=16**, CE only on last 4 steps (`--supervise-terminal-window 4`;
 \(w_k=0\) for \(k=1..12\)), plus
 \(\mathcal{L}_{\mathrm{brake}}=\lambda_{\mathrm{brake}}(\|\omega_{y,K}\|^2+\|\omega_{z,K}\|^2+\|v_{x,K}\|^2+\|v_{c,K}\|^2)\)
 with \(\lambda_{\mathrm{brake}}=0.01\) via `--gauge-kinetic-weight`. Desk cooled 10k:
-`scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh`.
+`scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh`. best blank **0.5685** @K=16;
+K_eval peak blank/exact at K=24 (**0.5726** / **0.098**); K≥64 exact=0 but blank
+floor ~0.29 (vs final-CE ~0.21). Softens overshoot vs `d6ffqu57`; **not a tip
+promote** (tip `f7fv0ymk` keeps high-K exact).
 
 ---
 
