@@ -42,6 +42,11 @@ K_eval peak blank/exact at K=24 (**0.5726** / **0.098**); K≥64 exact=0 but bla
 floor ~0.29 (vs final-CE ~0.21). Softens overshoot vs `d6ffqu57`; **not a tip
 promote** (tip `f7fv0ymk` keeps high-K exact).
 
+**Eval-only damp (no retrain):** for \(k>16\), scale \(\omega_y,\omega_z\) (opt. \(u_c\))
+by \(\eta=1/(1+\beta(k-16))\cdot\gamma^{k-16}\); leave \(u_x\) free. Prefer
+**β=1, γ=1, damp \(u_c\)** → blank≈0.57 / exact@512≈0.137 vs undamped floor ~0.29 /
+exact=0. Hook: `scripts/bipartite_sn_tm_keval.py --damp-beta/--damp-gamma/--damp-uc`.
+
 ---
 
 ## 1. What the model is
