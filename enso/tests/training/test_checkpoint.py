@@ -96,6 +96,18 @@ def test_save_last_persists_batch_in_epoch(tmp_path):
     assert meta['batch_in_epoch'] == 42
 
 
+def test_prune_orphan_epoch_checkpoints(tmp_path):
+    mgr = CheckpointManager(tmp_path, keep_top_k=2)
+    mgr.save(_make_data(epoch=0, cell_accuracy=0.3))
+    mgr.save(_make_data(epoch=1, cell_accuracy=0.8))
+    orphan = tmp_path / 'checkpoint_epoch099_acc0.0100.pt'
+    torch.save({'epoch': 99}, orphan)
+    mgr.reindex_from_disk()
+    mgr.prune_orphan_epoch_checkpoints()
+    assert not orphan.exists()
+    assert len(list(tmp_path.glob('checkpoint_epoch*.pt'))) == 2
+
+
 def test_load_restores_model(tmp_path):
     mgr = CheckpointManager(tmp_path, keep_top_k=3)
     data = _make_data(epoch=5, cell_accuracy=0.5)

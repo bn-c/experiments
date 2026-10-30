@@ -38,6 +38,28 @@ def riemannian_exp_map_orthant(s: Tensor, v: Tensor, dt: float = 1.0, eps: float
     return project_to_orthant_sphere(riemannian_exp_map(s, v, dt=dt, eps=eps), eps=eps)
 
 
+def riemannian_log_map(s: Tensor, y: Tensor, eps: float = 1e-8) -> Tensor:
+    """
+    Logarithmic map on the sphere: ``Log_s(y) ∈ T_s`` for unit ``s``, ``y``.
+
+    ``Log_s(y) = (θ / sin θ) · Proj_s(y)`` with ``θ = arccos(⟨s, y⟩)``.
+    Small-angle path returns the tangent projection (``θ/sinθ → 1``).
+    """
+    cos_theta = (s * y).sum(dim=-1, keepdim=True).clamp(-1.0 + eps, 1.0 - eps)
+    theta = cos_theta.acos()
+    u = y - cos_theta * s  # = Proj_s(y) when ||s||=1
+    # θ/sinθ → 1 as θ→0; avoid 0/0 with a series-friendly clamp on sin.
+    sin_theta = theta.sin().clamp_min(eps)
+    scale = torch.where(theta < 1e-4, torch.ones_like(theta), theta / sin_theta)
+    return u * scale
+
+
+def geodesic_distance(x: Tensor, y: Tensor, eps: float = 1e-8) -> Tensor:
+    """Geodesic distance ``arccos(⟨x, y⟩)`` on the unit sphere (last dim)."""
+    cos = (x * y).sum(dim=-1).clamp(-1.0 + eps, 1.0 - eps)
+    return cos.acos()
+
+
 def sudoku_group_indices() -> Tensor:
     """Return ``(27, 9)`` long indices for 9 rows + 9 cols + 9 boxes."""
     groups: list[list[int]] = []

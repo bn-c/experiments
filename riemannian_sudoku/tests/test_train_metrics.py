@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import torch
 
-from riemannian_sudoku.train import _blank_and_exact, unit_group_accuracies
+from riemannian_sudoku.train import _blank_and_exact, _cosine_t_max, unit_group_accuracies
+
+
+def test_cosine_t_max_legacy_and_horizon() -> None:
+    # Legacy: cool over remaining --steps.
+    assert _cosine_t_max(steps=50000, step=0, lr_cosine_steps=0) == 50000
+    assert _cosine_t_max(steps=50000, step=10000, lr_cosine_steps=0) == 40000
+    # Short horizon: cool like a 10k A/B, then hold floor.
+    assert _cosine_t_max(steps=50000, step=0, lr_cosine_steps=10000) == 10000
+    assert _cosine_t_max(steps=50000, step=2500, lr_cosine_steps=10000) == 7500
+    assert _cosine_t_max(steps=50000, step=10000, lr_cosine_steps=10000) is None
+    assert _cosine_t_max(steps=50000, step=20000, lr_cosine_steps=10000) is None
 
 
 def test_early_stop_cliff_predicate() -> None:

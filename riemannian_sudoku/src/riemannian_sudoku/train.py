@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from riemannian_sudoku.data import SudokuDataset, SudokuTorchDataset, split_train_val
 from riemannian_sudoku.geometry import sudoku_group_indices
-from riemannian_sudoku.model import RiemannianSudokuSolver
+from riemannian_sudoku.model import RiemannianSudokuSolver, build_solver
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -37,6 +37,55 @@ def _resolve_mixer(cli_mixer: str | None, ckpt_args: dict | None = None) -> str:
     if ckpt_args:
         return str(ckpt_args.get('mixer', 'euclid_axial'))
     return 'euclid_axial'
+
+
+def _resolve_use_gauge(cli_no_gauge: bool, ckpt_args: dict | None = None) -> bool:
+    """``--no-gauge`` wins; else ckpt ``args.use_gauge``; else True (live T² on)."""
+    if cli_no_gauge:
+        return False
+    if ckpt_args is not None and 'use_gauge' in ckpt_args:
+        return bool(ckpt_args['use_gauge'])
+    return True
+
+
+def _resolve_mlp_activation(cli_act: str | None, ckpt_args: dict | None = None) -> str:
+    """CLI ``--mlp-activation`` wins; else ckpt; else ``gelu`` (cross MLP default)."""
+    if cli_act:
+        return cli_act
+    if ckpt_args is not None and 'mlp_activation' in ckpt_args:
+        return str(ckpt_args['mlp_activation'])
+    return 'gelu'
+
+
+def _resolve_mlp_layers(cli_layers: int | None, ckpt_args: dict | None = None) -> int:
+    """CLI ``--mlp-layers`` wins when set (>0); else ckpt; else 1 (single mid block)."""
+    if cli_layers is not None and int(cli_layers) > 0:
+        return int(cli_layers)
+    if ckpt_args is not None and 'mlp_layers' in ckpt_args:
+        return max(1, int(ckpt_args['mlp_layers']))
+    return 1
+
+
+def _resolve_mlp_width(cli_width: str | None, ckpt_args: dict | None = None) -> str:
+    """CLI ``--mlp-width`` wins; else ckpt; else ``default`` (hidden=512)."""
+    if cli_width:
+        return cli_width
+    if ckpt_args is not None and 'mlp_width' in ckpt_args:
+        return str(ckpt_args['mlp_width'])
+    return 'default'
+
+
+def _cosine_t_max(*, steps: int, step: int, lr_cosine_steps: int) -> int | None:
+    """CosineAnnealingLR ``T_max``, or ``None`` to hold the floor (past horizon).
+
+    ``lr_cosine_steps=0`` → cool over remaining train steps (legacy).
+    ``lr_cosine_steps>0`` → cool over that many global steps, then hold ``η_min``.
+    """
+    if lr_cosine_steps <= 0:
+        return max(steps - step, 1)
+    if step >= lr_cosine_steps:
+        return None
+    return max(lr_cosine_steps - step, 1)
 
 
 def _blank_and_exact(
@@ -73,7 +122,7 @@ def unit_group_accuracies(
 
 
 @torch.no_grad()
-def evaluate(model: RiemannianSudokuSolver, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
     """Blank / exact / row / col / box accuracy on a loader."""
     model.eval()
     blank_sum = 0.0
@@ -109,7 +158,7 @@ def evaluate(model: RiemannianSudokuSolver, loader: DataLoader, device: torch.de
 
 def _save_ckpt(
     path: Path,
-    model: RiemannianSudokuSolver,
+    model: torch.nn.Module,
     opt: torch.optim.Optimizer,
     step: int,
     n_params: int,
@@ -135,10 +184,15 @@ def _save_ckpt(
                 'val_size': args.val_size,
                 'seed': args.seed,
                 'kinetic_weight': args.kinetic_weight,
+                'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
+                'use_gauge': args.use_gauge,
+                'mlp_activation': args.mlp_activation,
+                'mlp_layers': args.mlp_layers,
+                'mlp_width': args.mlp_width,
             },
         },
         path,
@@ -196,17 +250,30 @@ def train_cmd(args: argparse.Namespace) -> None:
 
     ckpt_args = (resume_ckpt.get('args') or {}) if resume_ckpt is not None else None
     args.mixer = _resolve_mixer(args.mixer, ckpt_args)
+    args.use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
+    args.mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
+    args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
+    args.mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
 
-    model = RiemannianSudokuSolver(
+    model = build_solver(
+        args.mixer,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
         kinetic_weight=args.kinetic_weight,
+        gauge_kinetic_weight=args.gauge_kinetic_weight,
         constraint_weight=args.constraint_weight,
         supervise_all_steps=args.supervise_all_steps,
-        mixer=args.mixer,
+        use_gauge=args.use_gauge,
+        mlp_activation=args.mlp_activation,
+        mlp_layers=args.mlp_layers,
+        mlp_width=args.mlp_width,
     ).to(device)
+    args.mlp_layers = int(getattr(model, 'mlp_layers', 1))
+    args.mlp_width = str(getattr(model, 'mlp_width', 'default'))
+    # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
+    args.use_gauge = bool(getattr(model, 'use_gauge', False))
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
         # Same hot-path wrap idea as sfprm_miniarc/train.py --compile.
@@ -248,9 +315,17 @@ def train_cmd(args: argparse.Namespace) -> None:
 
     sched = None
     if args.lr_schedule == 'cosine':
-        # Cosine over remaining steps from current `step`; floor at 10% of peak LR.
-        remaining = max(args.steps - step, 1)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=remaining, eta_min=args.lr * 0.1)
+        # Floor at 10% of peak. Optional --lr-cosine-steps decouples T_max from --steps
+        # so long runs can cool like a short A/B (avoids stretched-cosine cliff).
+        floor = args.lr * 0.1
+        t_max = _cosine_t_max(steps=args.steps, step=step, lr_cosine_steps=args.lr_cosine_steps)
+        if t_max is None:
+            for pg in opt.param_groups:
+                pg['lr'] = floor
+            logger.info('Cosine horizon passed (step=%d); holding lr=%.6g', step, floor)
+        else:
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t_max, eta_min=floor)
+            logger.info('CosineAnnealingLR T_max=%d eta_min=%.6g', t_max, floor)
 
     early_bad = 0
     early_stopped = False
@@ -273,14 +348,20 @@ def train_cmd(args: argparse.Namespace) -> None:
                 'batch_size': args.batch_size,
                 'lr': args.lr,
                 'lr_schedule': args.lr_schedule,
+                'lr_cosine_steps': args.lr_cosine_steps,
                 'grad_clip': args.grad_clip,
                 'early_stop_drop': args.early_stop_drop,
                 'early_stop_patience': args.early_stop_patience,
                 'kinetic_weight': args.kinetic_weight,
+                'gauge_kinetic_weight': args.gauge_kinetic_weight,
                 'constraint_weight': args.constraint_weight,
                 'supervise_all_steps': args.supervise_all_steps,
                 'no_augment': args.no_augment,
                 'mixer': args.mixer,
+                'use_gauge': args.use_gauge,
+                'mlp_activation': args.mlp_activation,
+                'mlp_layers': args.mlp_layers,
+                'mlp_width': args.mlp_width,
                 'max_steps': args.steps,
                 'n_params': n_params,
                 'seed': args.seed,
@@ -319,7 +400,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
         opt.step()
-        if sched is not None:
+        # Stop stepping after T_max so LR holds at eta_min (no cosine rebound).
+        if sched is not None and sched.last_epoch < sched.T_max:
             sched.step()
         step += 1
         if t_steady0 is None and step >= warmup_steps:
@@ -334,6 +416,7 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/loss': float(out['loss'].detach()),
             'train/task': float(out['task_loss']),
             'train/kinetic': float(out['kinetic_loss']),
+            'train/gauge_kinetic': float(out['gauge_kinetic_loss']),
             'train/constraint': float(out['constraint_loss']),
             'train/blank_acc': blank_acc,
             'train/exact_board': exact,
@@ -343,14 +426,36 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/lr': float(opt.param_groups[0]['lr']),
             'train/step': step,
         }
+        # Bipartite diags: ||ω_1||², ||ω_K||², scratch/claim energy, NP residual, logit_scale.
+        for key, wandb_key in (
+            ('omega_sq_1', 'train/omega_sq_1'),
+            ('omega_sq_k', 'train/omega_sq_k'),
+            ('scratch_energy', 'train/scratch_energy'),
+            ('blank_np', 'train/blank_np'),
+            ('claim_energy', 'train/claim_energy'),
+            ('logit_scale', 'train/logit_scale'),
+        ):
+            if key in out:
+                metrics[wandb_key] = float(out[key])
         pbar.set_postfix(
             loss=f'{metrics["train/loss"]:.3f}',
             blank=f'{blank_acc:.2f}',
+            kin=f'{metrics["train/kinetic"]:.3f}',
             row=f'{units["row_acc"]:.2f}',
         )
         pbar.update(1)
-        if wandb_run is not None and step % args.log_every == 0:
-            wandb_run.log(metrics, step=step)
+        if step % args.log_every == 0:
+            logger.info(
+                'step %d train loss=%.4f task=%.4f kinetic=%.6f gauge_kinetic=%.6f blank=%.4f',
+                step,
+                metrics['train/loss'],
+                metrics['train/task'],
+                metrics['train/kinetic'],
+                metrics['train/gauge_kinetic'],
+                blank_acc,
+            )
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=step)
 
         if step % args.eval_every == 0 or step == args.steps:
             val = evaluate(model, val_loader, device)
@@ -492,6 +597,10 @@ def train_cmd(args: argparse.Namespace) -> None:
     print(f'MAX_VRAM_GB={max_vram_gb:.3f}')
     print(f'COMPILE={int(args.compile)}')
     print(f'MIXER={args.mixer}')
+    print(f'USE_GAUGE={int(args.use_gauge)}')
+    print(f'MLP_ACTIVATION={args.mlp_activation}')
+    print(f'MLP_LAYERS={args.mlp_layers}')
+    print(f'MLP_WIDTH={args.mlp_width}')
     print(f'EARLY_STOPPED={int(early_stopped)}')
     print(f'STOP_STEP={step}')
 
@@ -500,13 +609,24 @@ def eval_cmd(args: argparse.Namespace) -> None:
     """Evaluate a checkpoint on HF test (or train-head holdout)."""
     device = _resolve_device()
     ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt.get('args') or {})
-    model = RiemannianSudokuSolver(
+    ckpt_args = ckpt.get('args') or {}
+    mixer = _resolve_mixer(getattr(args, 'mixer', None), ckpt_args)
+    use_gauge = _resolve_use_gauge(bool(getattr(args, 'no_gauge', False)), ckpt_args)
+    mlp_activation = _resolve_mlp_activation(getattr(args, 'mlp_activation', None), ckpt_args)
+    mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
+    mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
+    model = build_solver(
+        mixer,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_steps=args.num_steps,
         dt=args.dt,
-        mixer=mixer,
+        use_gauge=use_gauge,
+        mlp_activation=mlp_activation,
+        mlp_layers=mlp_layers,
+        mlp_width=mlp_width,
+        gauge_kinetic_weight=float(ckpt_args.get('gauge_kinetic_weight', 0.0)),
+        supervise_all_steps=bool(ckpt_args.get('supervise_all_steps', False)),
     )
     model.load_state_dict(ckpt['model'])
     model.to(device)
@@ -547,6 +667,12 @@ def main() -> None:
     t.add_argument('--batch-size', type=int, default=32)
     t.add_argument('--lr', type=float, default=3e-4)
     t.add_argument('--lr-schedule', type=str, default='constant', choices=['constant', 'cosine'])
+    t.add_argument(
+        '--lr-cosine-steps',
+        type=int,
+        default=0,
+        help='Cosine T_max in global steps (0=remaining --steps). After horizon, hold 0.1·peak',
+    )
     t.add_argument('--grad-clip', type=float, default=1.0, help='clip_grad_norm_ max_norm; 0 disables')
     t.add_argument(
         '--early-stop-drop',
@@ -571,7 +697,13 @@ def main() -> None:
     t.add_argument('--wandb-name', type=str, default='', help='Optional W&B run name')
     t.add_argument('--no-wandb', action='store_true')
     t.add_argument('--no-augment', action='store_true')
-    t.add_argument('--kinetic-weight', type=float, default=0.05, help='λ_k on final-step velocity energy')
+    t.add_argument('--kinetic-weight', type=float, default=0.05, help='λ_k on final-step cell velocity energy')
+    t.add_argument(
+        '--gauge-kinetic-weight',
+        type=float,
+        default=0.0,
+        help='λ_g on final-step gauge velocity energy (cross_coupled only; 0=off, axial unchanged)',
+    )
     t.add_argument('--constraint-weight', type=float, default=0.1, help='λ_c on unit-sum MSE')
     t.add_argument(
         '--supervise-all-steps',
@@ -582,8 +714,46 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled'],
+        choices=[
+            'euclid_axial',
+            'cross_coupled',
+            'geo_karcher',
+            'geo_log',
+            'geo_transformer',
+            'bipartite_sn_tm',
+        ],
         help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
+    )
+    t.add_argument(
+        '--no-gauge',
+        action='store_true',
+        help=(
+            'cross_coupled cells-only ablation (omit live T²): 729→MLP→729. '
+            'Default OFF = Method 1+2 live T² init + MLP updates g (765→MLP→765)'
+        ),
+    )
+    t.add_argument(
+        '--mlp-activation',
+        type=str,
+        default=None,
+        choices=['gelu', 'silu', 'swiglu'],
+        help='cross_coupled ambient MLP nonlinearity (default gelu; axial unchanged; on --resume reads ckpt)',
+    )
+    t.add_argument(
+        '--mlp-layers',
+        type=int,
+        default=None,
+        help='cross_coupled mid nonlinear blocks (default 1; swiglu: SwiGLU×N; on --resume reads ckpt)',
+    )
+    t.add_argument(
+        '--mlp-width',
+        type=str,
+        default=None,
+        choices=['default', 'expand'],
+        help=(
+            'cross_coupled MLP hidden: default=512; expand=2·in_dim '
+            '(live gauge: 1530; --no-gauge: 1458); on --resume reads ckpt'
+        ),
     )
     t.add_argument(
         '--compile',
@@ -618,8 +788,40 @@ def main() -> None:
         '--mixer',
         type=str,
         default=None,
-        choices=['euclid_axial', 'cross_coupled'],
+        choices=[
+            'euclid_axial',
+            'cross_coupled',
+            'geo_karcher',
+            'geo_log',
+            'geo_transformer',
+            'bipartite_sn_tm',
+        ],
         help='override mixer; default reads ckpt args',
+    )
+    e.add_argument(
+        '--no-gauge',
+        action='store_true',
+        help='force cells-only (omit live T²); default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-activation',
+        type=str,
+        default=None,
+        choices=['gelu', 'silu', 'swiglu'],
+        help='override cross MLP activation; default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-layers',
+        type=int,
+        default=None,
+        help='override cross MLP mid-block count; default reads ckpt args',
+    )
+    e.add_argument(
+        '--mlp-width',
+        type=str,
+        default=None,
+        choices=['default', 'expand'],
+        help='override cross MLP hidden width; default reads ckpt args',
     )
 
     args = parser.parse_args()

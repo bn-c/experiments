@@ -91,6 +91,8 @@ class Trainer:
         self.total_steps = len(train_loader) * cfg.train.epochs
         self.scheduler = create_lr_scheduler(self.optimizer, cfg.train, self.total_steps)
         self.checkpoint_mgr = CheckpointManager(cfg.train.checkpoint_dir, cfg.train.keep_top_k)
+        self.checkpoint_mgr.reindex_from_disk()
+        self.checkpoint_mgr.prune_orphan_epoch_checkpoints()
 
         self.start_epoch = 0
         self._resume_skip_batches = 0
@@ -123,6 +125,7 @@ class Trainer:
         self._last_val_energy = float(meta.get('val_energy', 0.0))
         self._last_cell_acc = float(meta.get('cell_accuracy', 0.0))
         self.checkpoint_mgr.reindex_from_disk()
+        self.checkpoint_mgr.prune_orphan_epoch_checkpoints()
         logger.info(
             'Resumed from %s at epoch %d batch %d (global_step=%d, skip %d batches, last cell_acc=%.4f)',
             path.name,

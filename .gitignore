@@ -21,3 +21,5 @@ samples/
 *.png
 *.mp4
 *.gif
+gpucore.*
+**/logs/vram-mon-*.csv

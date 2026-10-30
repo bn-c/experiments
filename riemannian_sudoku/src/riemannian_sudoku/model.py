@@ -1,17 +1,20 @@
-"""Riemannian Sudoku solver: Euclidean axial or cross-coupled + live T² gauge."""
+"""Riemannian Sudoku solver: Euclidean axial, cross-coupled, or geometric attention."""
 
 from __future__ import annotations
 
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from riemannian_sudoku.axial import SudokuAxialAttention
 from riemannian_sudoku.geometry import (
     project_tangent,
+    project_to_orthant_sphere,
     riemannian_exp_map,
     riemannian_exp_map_orthant,
+    riemannian_log_map,
     sudoku_group_indices,
     unit_sum_penalty,
 )
@@ -21,6 +24,62 @@ _CROSS_IN = 81 * 9 + 18 * 2  # 765
 _CROSS_S = 81 * 9  # 729
 _CROSS_G = 18 * 2  # 36
 _CROSS_H = 512
+_MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
+_MLP_WIDTHS = ('default', 'expand')
+_MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer')
+_ALL_MIXERS = _MIXERS + ('bipartite_sn_tm',)
+_GEO_MIXERS = ('geo_karcher', 'geo_log')
+_GEO_TF_LAYERS = 2
+_GEO_KARCHER_STEPS = 2
+_SOFTPLUS_INV_1 = math.log(math.e - 1.0)  # softplus⁻¹(1)
+
+
+class _SwiGLU(nn.Module):
+    """``W3(silu(W_gate(x)) * W_up(x))``; hidden ≈ ``dim/3`` so Linear+this+Linear ≈ 3-layer GELU width."""
+
+    def __init__(self, dim: int, hidden: int | None = None) -> None:
+        super().__init__()
+        # Match Linear(dim,dim) params: dim²+dim ≈ 3·dim·h + 2h + dim → h ≈ dim²/(3dim+2).
+        h = hidden if hidden is not None else max(1, (dim * dim) // (3 * dim + 2))
+        self.w12 = nn.Linear(dim, 2 * h)
+        self.w3 = nn.Linear(h, dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        a, b = self.w12(x).chunk(2, dim=-1)
+        return self.w3(F.silu(a) * b)
+
+
+def _cross_mlp(
+    in_dim: int,
+    out_dim: int,
+    hidden: int,
+    activation: str,
+    n_layers: int = 1,
+) -> nn.Module:
+    """Build cross_coupled ambient MLP; ``activation`` ∈ gelu|silu|swiglu.
+
+    ``n_layers`` = number of mid nonlinear blocks (default 1 = prior topology):
+    - swiglu: ``Linear → (SwiGLU)×n → Linear``
+    - gelu/silu: ``Linear → act → (Linear → act)×n → Linear`` with one mid Linear when n=1
+    """
+    if activation not in _MLP_ACTIVATIONS:
+        raise ValueError(f'unknown mlp_activation {activation!r}; expected gelu|silu|swiglu')
+    if n_layers < 1:
+        raise ValueError(f'mlp_layers must be >= 1, got {n_layers}')
+    layers: list[nn.Module] = [nn.Linear(in_dim, hidden)]
+    if activation == 'swiglu':
+        # silu gate lives inside each SwiGLU; fair mid width h≈170 per block.
+        for _ in range(n_layers):
+            layers.append(_SwiGLU(hidden))
+        layers.append(nn.Linear(hidden, out_dim))
+        return nn.Sequential(*layers)
+    act_cls: type[nn.Module] = nn.GELU if activation == 'gelu' else nn.SiLU
+    layers.append(act_cls())
+    for _ in range(n_layers):
+        layers.append(nn.Linear(hidden, hidden))
+        layers.append(act_cls())
+    layers.append(nn.Linear(hidden, out_dim))
+    return nn.Sequential(*layers)
 
 
 def _torus_t3_pe() -> Tensor:
@@ -34,6 +93,136 @@ def _torus_t3_pe() -> Tensor:
         pe[:, 2 * i] = torch.cos(theta)
         pe[:, 2 * i + 1] = torch.sin(theta)
     return pe
+
+
+def _softplus_inv_init(target: float) -> float:
+    """Scalar ``x`` such that ``softplus(x) ≈ target`` (target > 0)."""
+    # softplus(x) = log(1+e^x) → x = log(e^t - 1)
+    return math.log(math.exp(target) - 1.0)
+
+
+def _unit_neighbor_mask() -> Tensor:
+    """``(81, 81)`` bool: cells share a row, column, or box (includes self)."""
+    rows = torch.arange(9).unsqueeze(1).expand(9, 9).reshape(81)
+    cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81)
+    boxes = (rows // 3) * 3 + (cols // 3)
+    return (
+        (rows[:, None] == rows[None, :])
+        | (cols[:, None] == cols[None, :])
+        | (boxes[:, None] == boxes[None, :])
+    )
+
+
+class GeometricCrossAttention(nn.Module):
+    """
+    Cells-only geodesic affinities + 2-step weighted Karcher mean on ``S⁸₊``.
+
+    Affinities ``α_ij ∝ exp(-d²/(2σ²))`` with learnable ``σ = softplus(·)``.
+    Keys = **clues** inside row∪col∪box (blank–blank RBF would dominate because
+    blanks start identical; clues carry the only digit signal). Callers freeze
+    clue *queries* via ``blank_mask`` on the update.
+    """
+
+    def __init__(self, karcher_steps: int = _GEO_KARCHER_STEPS, init_sigma: float = 1.0) -> None:
+        super().__init__()
+        self.karcher_steps = int(karcher_steps)
+        self.raw_sigma = nn.Parameter(torch.tensor(_softplus_inv_init(init_sigma)))
+        # Inner Karcher GD step size η = softplus(·), init 1.
+        self.raw_eta = nn.Parameter(torch.tensor(_SOFTPLUS_INV_1))
+        self.register_buffer('neighbor_mask', _unit_neighbor_mask(), persistent=True)
+
+    @property
+    def sigma(self) -> Tensor:
+        return F.softplus(self.raw_sigma).clamp_min(1e-4)
+
+    @property
+    def eta(self) -> Tensor:
+        return F.softplus(self.raw_eta).clamp_min(1e-4)
+
+    def affinities(self, s: Tensor, blank_mask: Tensor, eps: float = 1e-6) -> Tensor:
+        """
+        Geodesic RBF affinities ``(B, 81, 81)`` over clue neighbors; rows sum to 1.
+
+        ``blank_mask`` ``(B, 81)``: 1 = blank (excluded as key), 0 = clue (key).
+        """
+        cos = torch.einsum('bid,bjd->bij', s, s).clamp(-1.0 + eps, 1.0 - eps)
+        d2 = cos.acos().square()
+        logits = -d2 / (2.0 * self.sigma.square())
+        # Keys: unit-neighbor clues only.
+        clue_keys = blank_mask <= 0  # (B, 81)
+        allow = self.neighbor_mask.unsqueeze(0) & clue_keys.unsqueeze(1)
+        logits = logits.masked_fill(~allow, float('-inf'))
+        alpha = torch.softmax(logits, dim=-1)
+        return torch.nan_to_num(alpha, nan=0.0)
+
+    def forward(self, s: Tensor, blank_mask: Tensor) -> tuple[Tensor, Tensor]:
+        """Returns ``(m, alpha)`` — Karcher means and affinities for all cells."""
+        alpha = self.affinities(s, blank_mask)
+        m = s
+        eta = self.eta
+        eps = 1e-8
+        for _ in range(self.karcher_steps):
+            cos = torch.einsum('bqd,bkd->bqk', m, s).clamp(-1.0 + eps, 1.0 - eps)
+            theta = cos.acos()
+            u = s.unsqueeze(1) - cos.unsqueeze(-1) * m.unsqueeze(2)
+            sin_t = theta.sin().clamp_min(eps)
+            scale = torch.where(theta < 1e-4, torch.ones_like(theta), theta / sin_t)
+            log = u * scale.unsqueeze(-1)
+            v = (alpha.unsqueeze(-1) * log).sum(dim=2) * eta
+            v = project_tangent(m, v)
+            m = project_to_orthant_sphere(riemannian_exp_map(m, v, dt=1.0))
+        return m, alpha
+
+
+class ManifoldTokenTransformer(nn.Module):
+    """
+    Cells-only manifold tokens (no live ``T²``): ``Linear(s) + e_row[r] + e_col[c]``
+    → 2-layer Transformer (MHA + SiLU FFN) → shared SiLU-expand head
+    ``d→2d→SiLU→2d→SiLU→9``. No box embed in v1.
+
+    Params scale ``O(1)`` in ``M`` (sequence length 81).
+    """
+
+    def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = _GEO_TF_LAYERS) -> None:
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(f'd_model={d_model} must be divisible by n_heads={n_heads}')
+        self.d_model = d_model
+        self.encode = nn.Linear(9, d_model)
+        self.row_embed = nn.Embedding(9, d_model)
+        self.col_embed = nn.Embedding(9, d_model)
+        rows = torch.arange(9).unsqueeze(1).expand(9, 9).reshape(81)
+        cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81)
+        self.register_buffer('cell_rows', rows, persistent=True)
+        self.register_buffer('cell_cols', cols, persistent=True)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=4 * d_model,
+            dropout=0.0,
+            activation=F.silu,
+            batch_first=True,
+            norm_first=False,
+        )
+        # SiLU FFN disables nested-tensor path; silence the enable_nested_tensor warn.
+        self.transformer = nn.TransformerEncoder(
+            enc_layer, num_layers=n_layers, enable_nested_tensor=False
+        )
+        # Shared SiLU-expand head (plan: d→2d→SiLU→2d→SiLU→9).
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 2 * d_model),
+            nn.SiLU(),
+            nn.Linear(2 * d_model, 2 * d_model),
+            nn.SiLU(),
+            nn.Linear(2 * d_model, 9),
+        )
+
+    def forward(self, s: Tensor) -> Tensor:
+        """``s`` ``(B, 81, 9)`` → ambient velocity ``(B, 81, 9)``."""
+        pos = self.row_embed(self.cell_rows) + self.col_embed(self.cell_cols)
+        h = self.encode(s) + pos
+        h = self.transformer(h)
+        return self.head(h)
 
 
 def init_sphere_state(puzzle: Tensor) -> tuple[Tensor, Tensor]:
@@ -81,8 +270,19 @@ class RiemannianSudokuSolver(nn.Module):
     ``euclid_axial`` (default): concat ``[s, T3]`` → Linear → axial → velocity →
     tangent project → clue freeze → Exp + abs-renorm.
 
-    ``cross_coupled``: concat flatten(s)+flatten(g) → MLP → per-manifold tangent
-    project → parallel Exp (cell orthant + circle Exp on each S¹ gauge factor).
+    ``cross_coupled`` (default ``use_gauge=True``): live Method 1+2 — init T²
+    (18 row/col circles, θ=2π·idx/9), concat flatten(s)+flatten(g) → MLP →
+    (v_s, v_g), tangent project, parallel Exp (cell orthant + S¹ on each circle).
+    Gauge is ODE state updated by the MLP vector field (not fixed PE).
+
+    ``use_gauge=False`` (``--no-gauge``): true cells-only ablation for prior A/Bs —
+    flatten(s) → MLP → cell tangent only (729→MLP→729); no T² init / v_g / λ_g.
+
+    ``geo_karcher`` / ``geo_log``: cells-only geodesic affinities + 2-step Karcher;
+    (1) state ← mean, or (2) ``v = Log_x(m)`` then Exp + orthant + kinetic.
+
+    ``geo_transformer``: cells-only (no live ``T²``) — ``Linear(s)+e_row+e_col`` →
+    2-layer Transformer → shared SiLU-expand head → tangent / Exp (O(1) in M).
     """
 
     def __init__(
@@ -92,22 +292,47 @@ class RiemannianSudokuSolver(nn.Module):
         num_steps: int = 8,
         dt: float = 0.5,
         kinetic_weight: float = 0.05,
+        gauge_kinetic_weight: float = 0.0,
         constraint_weight: float = 0.1,
         supervise_all_steps: bool = False,
         mixer: str = 'euclid_axial',
+        use_gauge: bool = True,
+        mlp_activation: str = 'gelu',
+        mlp_layers: int = 1,
+        mlp_width: str = 'default',
     ) -> None:
         super().__init__()
-        if mixer not in ('euclid_axial', 'cross_coupled'):
-            raise ValueError(f'unknown mixer {mixer!r}; expected euclid_axial|cross_coupled')
+        if mixer not in _MIXERS:
+            raise ValueError(f'unknown mixer {mixer!r}; expected {"|".join(_MIXERS)}')
+        if mlp_activation not in _MLP_ACTIVATIONS:
+            raise ValueError(f'unknown mlp_activation {mlp_activation!r}; expected gelu|silu|swiglu')
+        if mlp_layers < 1:
+            raise ValueError(f'mlp_layers must be >= 1, got {mlp_layers}')
+        if mlp_width not in _MLP_WIDTHS:
+            raise ValueError(f'unknown mlp_width {mlp_width!r}; expected default|expand')
         self.mixer = mixer
+        # Gauge only exists on the cross_coupled path; axial / geo ignore the flag.
+        self.use_gauge = bool(use_gauge) and mixer == 'cross_coupled'
+        # Axial / geo stay free of MLP activation; flag only selects cross ambient MLP.
+        self.mlp_activation = mlp_activation if mixer == 'cross_coupled' else 'gelu'
+        self.mlp_layers = int(mlp_layers) if mixer == 'cross_coupled' else 1
+        self.mlp_width = mlp_width if mixer == 'cross_coupled' else 'default'
         self.d_model = d_model
         self.num_steps = num_steps
         self.dt = dt
         self.kinetic_weight = kinetic_weight
+        self.gauge_kinetic_weight = gauge_kinetic_weight
         self.constraint_weight = constraint_weight
         self.supervise_all_steps = supervise_all_steps
 
         self.register_buffer('group_indices', sudoku_group_indices(), persistent=True)
+
+        self.proj = None
+        self.axial = None
+        self.velocity = None
+        self.cross_mlp = None
+        self.geo_attn = None
+        self.geo_tf = None
 
         if mixer == 'euclid_axial':
             self.proj = nn.Linear(9 + 6, d_model)
@@ -118,18 +343,21 @@ class RiemannianSudokuSolver(nn.Module):
                 nn.Linear(d_model, 9),
             )
             self.register_buffer('t3_pe', _torus_t3_pe(), persistent=True)
-            self.cross_mlp = None
-        else:
-            self.proj = None
-            self.axial = None
-            self.velocity = None
-            self.cross_mlp = nn.Sequential(
-                nn.Linear(_CROSS_IN, _CROSS_H),
-                nn.GELU(),
-                nn.Linear(_CROSS_H, _CROSS_H),
-                nn.GELU(),
-                nn.Linear(_CROSS_H, _CROSS_S + _CROSS_G),
+        elif mixer == 'cross_coupled':
+            # Live T²: 765→H→…→765; --no-gauge cells-only: 729→H→…→729.
+            # default H=512; expand H=2·in_dim (gauge: 1530; cells-only: 1458).
+            # gelu/silu: mid Linear(s); swiglu: mid SwiGLU(s) with fair mid width.
+            in_dim = _CROSS_IN if self.use_gauge else _CROSS_S
+            out_dim = (_CROSS_S + _CROSS_G) if self.use_gauge else _CROSS_S
+            hidden = (2 * in_dim) if self.mlp_width == 'expand' else _CROSS_H
+            self.cross_mlp = _cross_mlp(
+                in_dim, out_dim, hidden, self.mlp_activation, n_layers=self.mlp_layers
             )
+        elif mixer == 'geo_transformer':
+            self.geo_tf = ManifoldTokenTransformer(d_model=d_model, n_heads=n_heads)
+        else:
+            # geo_karcher / geo_log: cells-only geometric attention (no gauge, no MLP v).
+            self.geo_attn = GeometricCrossAttention(karcher_steps=_GEO_KARCHER_STEPS)
 
     def _velocity_at(self, s: Tensor) -> Tensor:
         assert self.proj is not None and self.axial is not None and self.velocity is not None
@@ -138,10 +366,14 @@ class RiemannianSudokuSolver(nn.Module):
         h = self.axial(h)
         return self.velocity(h)
 
-    def _cross_velocities(self, s: Tensor, g: Tensor) -> tuple[Tensor, Tensor]:
-        """Shared MLP → ambient (v_s, v_g); caller projects to each tangent."""
+    def _cross_velocities(self, s: Tensor, g: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
+        """Shared MLP → ambient (v_s[, v_g]); caller projects to each tangent."""
         assert self.cross_mlp is not None
         b = s.shape[0]
+        if not self.use_gauge:
+            v_s = self.cross_mlp(s.reshape(b, _CROSS_S)).reshape(b, 81, 9)
+            return v_s, None
+        assert g is not None
         x = torch.cat([s.reshape(b, _CROSS_S), g.reshape(b, _CROSS_G)], dim=-1)
         out = self.cross_mlp(x)
         v_s = out[:, :_CROSS_S].reshape(b, 81, 9)
@@ -158,6 +390,10 @@ class RiemannianSudokuSolver(nn.Module):
         if self.mixer == 'cross_coupled':
             s, velocities, states, _g = self._integrate_cross_coupled(puzzle)
             return s, velocities, states
+        if self.mixer == 'geo_transformer':
+            return self._integrate_geo_transformer(puzzle)
+        if self.mixer in _GEO_MIXERS:
+            return self._integrate_geo(puzzle)
         return self._integrate_euclid_axial(puzzle)
 
     def _integrate_euclid_axial(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
@@ -181,32 +417,96 @@ class RiemannianSudokuSolver(nn.Module):
 
     def _integrate_cross_coupled(
         self, puzzle: Tensor
-    ) -> tuple[Tensor, list[Tensor], list[Tensor], Tensor]:
-        """Parallel Exp on cell spheres + live T² gauge circles."""
+    ) -> tuple[Tensor, list[Tensor], list[Tensor], Tensor | None]:
+        """Parallel Exp on cell spheres; live T² gauge when ``use_gauge`` else cells-only."""
         s, blank_mask = init_sphere_state(puzzle)
-        g = init_t2_gauge(s.shape[0], device=s.device, dtype=s.dtype)
+        g: Tensor | None = (
+            init_t2_gauge(s.shape[0], device=s.device, dtype=s.dtype) if self.use_gauge else None
+        )
         velocities: list[Tensor] = []
         gauge_velocities: list[Tensor] = []
         states: list[Tensor] = []
         for _ in range(self.num_steps):
             v_s, v_g = self._cross_velocities(s, g)
             v_s = project_tangent(s, v_s)
-            v_g = project_tangent(g, v_g)
-            v_s = v_s * blank_mask.unsqueeze(-1)  # gauge always free
+            v_s = v_s * blank_mask.unsqueeze(-1)  # gauge always free when present
             velocities.append(v_s)
-            gauge_velocities.append(v_g)
             s = riemannian_exp_map_orthant(s, v_s, dt=self.dt)
-            g = riemannian_exp_map(g, v_g, dt=self.dt)  # S¹ Exp; no orthant
+            if g is not None and v_g is not None:
+                v_g = project_tangent(g, v_g)
+                gauge_velocities.append(v_g)
+                g = riemannian_exp_map(g, v_g, dt=self.dt)  # S¹ Exp; no orthant
             clues = blank_mask == 0
             digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
             s_clue = torch.zeros_like(s)
             s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
             s = torch.where(clues.unsqueeze(-1), s_clue, s)
             states.append(s)
-        # Stash last gauge velocity for tests / diagnostics (not used by loss).
+        # Stash for diagnostics + optional gauge kinetic (λ_g via forward).
         self._last_gauge = g
-        self._last_gauge_velocities = gauge_velocities
+        self._last_gauge_velocities = gauge_velocities if self.use_gauge else None
         return s, velocities, states, g
+
+    def _integrate_geo_transformer(
+        self, puzzle: Tensor
+    ) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """Cells-only manifold-token Transformer → tangent project → Exp + orthant."""
+        assert self.geo_tf is not None
+        s, blank_mask = init_sphere_state(puzzle)
+        velocities: list[Tensor] = []
+        states: list[Tensor] = []
+        for _ in range(self.num_steps):
+            v = self.geo_tf(s)
+            v = project_tangent(s, v)
+            v = v * blank_mask.unsqueeze(-1)
+            velocities.append(v)
+            s = riemannian_exp_map_orthant(s, v, dt=self.dt)
+            clues = blank_mask == 0
+            digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
+            s_clue = torch.zeros_like(s)
+            s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
+            s = torch.where(clues.unsqueeze(-1), s_clue, s)
+            states.append(s)
+        self._last_gauge = None
+        self._last_gauge_velocities = None
+        return s, velocities, states
+
+    def _integrate_geo(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """
+        Cells-only geometric cross-attention ODE.
+
+        ``geo_karcher``: blank cells ← Karcher mean (orthant); clues frozen.
+        ``geo_log``: ``v = Log_s(m)``, clue-mask, Exp + orthant (existing kinetic).
+        """
+        assert self.geo_attn is not None
+        s, blank_mask = init_sphere_state(puzzle)
+        velocities: list[Tensor] = []
+        states: list[Tensor] = []
+        for _ in range(self.num_steps):
+            m, _alpha = self.geo_attn(s, blank_mask)
+            if self.mixer == 'geo_karcher':
+                # State ← mean on blanks; Log displacement for kinetic logging only.
+                m = project_to_orthant_sphere(m)
+                v = riemannian_log_map(s, m)
+                v = v * blank_mask.unsqueeze(-1)
+                velocities.append(v)
+                s = torch.where(blank_mask.unsqueeze(-1) > 0, m, s)
+            else:
+                # geo_log: free tangent v = Log → Exp + orthant (dt as usual).
+                v = riemannian_log_map(s, m)
+                v = project_tangent(s, v)
+                v = v * blank_mask.unsqueeze(-1)
+                velocities.append(v)
+                s = riemannian_exp_map_orthant(s, v, dt=self.dt)
+            clues = blank_mask == 0
+            digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, 8)
+            s_clue = torch.zeros_like(s)
+            s_clue.scatter_(-1, digit_idx.unsqueeze(-1), 1.0)
+            s = torch.where(clues.unsqueeze(-1), s_clue, s)
+            states.append(s)
+        self._last_gauge = None
+        self._last_gauge_velocities = None
+        return s, velocities, states
 
     @staticmethod
     def _blank_nll(probs: Tensor, solution: Tensor, mask: Tensor) -> Tensor:
@@ -233,9 +533,19 @@ class RiemannianSudokuSolver(nn.Module):
         """
         if self.mixer == 'cross_coupled':
             s, velocities, states, g = self._integrate_cross_coupled(puzzle)
+            gauge_velocities = self._last_gauge_velocities
+        elif self.mixer == 'geo_transformer':
+            s, velocities, states = self._integrate_geo_transformer(puzzle)
+            g = None
+            gauge_velocities = None
+        elif self.mixer in _GEO_MIXERS:
+            s, velocities, states = self._integrate_geo(puzzle)
+            g = None
+            gauge_velocities = None
         else:
             s, velocities, states = self._integrate_euclid_axial(puzzle)
             g = None
+            gauge_velocities = None
 
         probs = s.square()
         pred = probs.argmax(dim=-1) + 1  # digits 1-9
@@ -260,18 +570,69 @@ class RiemannianSudokuSolver(nn.Module):
         else:
             task_loss = self._blank_nll(probs, solution, mask)
 
-        # Kinetic on cell velocities only; gauge v_g is intentionally unregularized
-        # (loss recipe unchanged vs euclid_axial — do not "fix" by accident).
+        # Cell kinetic (always); gauge kinetic optional (λ_g=0 default — axial unchanged).
         kinetic = velocities[-1].square().mean()
+        if gauge_velocities is not None:
+            gauge_kinetic = gauge_velocities[-1].square().mean()
+        else:
+            gauge_kinetic = kinetic.new_zeros(())
         constraint = unit_sum_penalty(probs, self.group_indices)
-        loss = task_loss + self.kinetic_weight * kinetic + self.constraint_weight * constraint
+        loss = (
+            task_loss
+            + self.kinetic_weight * kinetic
+            + self.gauge_kinetic_weight * gauge_kinetic
+            + self.constraint_weight * constraint
+        )
 
         out.update(
             {
                 'loss': loss,
                 'task_loss': task_loss.detach(),
                 'kinetic_loss': kinetic.detach(),
+                'gauge_kinetic_loss': gauge_kinetic.detach(),
                 'constraint_loss': constraint.detach(),
             }
         )
         return out
+
+
+def build_solver(
+    mixer: str = 'euclid_axial',
+    *,
+    d_model: int = 128,
+    n_heads: int = 4,
+    num_steps: int = 8,
+    dt: float = 0.5,
+    kinetic_weight: float = 0.05,
+    gauge_kinetic_weight: float = 0.0,
+    constraint_weight: float = 0.1,
+    supervise_all_steps: bool = False,
+    use_gauge: bool = True,
+    mlp_activation: str = 'gelu',
+    mlp_layers: int = 1,
+    mlp_width: str = 'default',
+) -> nn.Module:
+    """Factory: ``bipartite_sn_tm`` → ``BipartiteSnTmSolver``; else ``RiemannianSudokuSolver``."""
+    if mixer == 'bipartite_sn_tm':
+        from riemannian_sudoku.solver import BipartiteSnTmSolver
+
+        return BipartiteSnTmSolver(
+            num_steps=num_steps,
+            omega_weight=gauge_kinetic_weight,  # λ_ω via --gauge-kinetic-weight
+            supervise_all_steps=supervise_all_steps,
+        )
+    return RiemannianSudokuSolver(
+        d_model=d_model,
+        n_heads=n_heads,
+        num_steps=num_steps,
+        dt=dt,
+        kinetic_weight=kinetic_weight,
+        gauge_kinetic_weight=gauge_kinetic_weight,
+        constraint_weight=constraint_weight,
+        supervise_all_steps=supervise_all_steps,
+        mixer=mixer,
+        use_gauge=use_gauge,
+        mlp_activation=mlp_activation,
+        mlp_layers=mlp_layers,
+        mlp_width=mlp_width,
+    )
