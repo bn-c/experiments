@@ -404,3 +404,55 @@ def test_sudoku_adapter_pack() -> None:
     assert a_s2t.shape == (27, 81) and a_t2s.shape == (81, 3, 27)
     assert poles_o.shape == (9, D)
 
+
+def test_init_and_adapter_device_match_poles() -> None:
+    """is_clue / x / y land on poles.device even when puzzle starts on CPU."""
+    from riemannian_sudoku.manifold_embed import SudokuProblemAdapter
+
+    poles = simplex_etf_poles()
+    pe = torus_t3_pe()
+    puzzle_cpu = torch.randint(0, 10, (2, 81), device='cpu')
+    x, y, is_clue = init_bipartite_state(puzzle_cpu, poles, pe)
+    assert x.device == poles.device
+    assert y.device == poles.device
+    assert is_clue.device == poles.device
+    # where(clue, pole_x, x) must not raise — all same device
+    assert (x[is_clue].norm(dim=-1) - 1).abs().max() < 1e-4
+
+    adapter = SudokuProblemAdapter(poles, pe)
+    x0, is_clue2, pe_o, a_s2t, a_t2s, poles_o, y0 = adapter.encode(puzzle_cpu)
+    for t in (x0, is_clue2, pe_o, a_s2t, a_t2s, poles_o, y0):
+        assert t.device == poles.device, f'{t.shape} on {t.device} != poles {poles.device}'
+
+
+def test_init_device_aligns_when_poles_not_on_puzzle_device() -> None:
+    """
+    Regression for compile desk crash: poles on cuda, puzzle on cpu → all on poles.
+
+    Falls back to a CPU same-device assert when CUDA is unavailable (still checks
+    that poles remain the canonical device).
+    """
+    poles = simplex_etf_poles()
+    pe = torus_t3_pe()
+    puzzle = torch.randint(0, 10, (2, 81), device='cpu')
+    if torch.cuda.is_available():
+        poles_g = poles.cuda()
+        pe_g = pe.cuda()
+        x, y, is_clue = init_bipartite_state(puzzle, poles_g, pe_g)
+        assert x.device.type == 'cuda'
+        assert is_clue.device.type == 'cuda'
+        assert y.device.type == 'cuda'
+        # Smoke: one geodesic step with clue mask on GPU
+        from riemannian_sudoku.geodesic import geodesic_step
+
+        u = torch.randn_like(x)
+        x1 = geodesic_step(x, u, x, is_clue)
+        assert x1.device.type == 'cuda'
+        # Façade integrate on CUDA
+        model = BipartiteSnTmSolver(num_steps=1).cuda()
+        out = model(puzzle.cuda())
+        assert out['x'].device.type == 'cuda'
+    else:
+        x, y, is_clue = init_bipartite_state(puzzle, poles, pe)
+        assert is_clue.device == x.device == poles.device
+

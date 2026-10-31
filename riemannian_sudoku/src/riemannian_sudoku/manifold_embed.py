@@ -118,19 +118,20 @@ class SudokuProblemAdapter:
         self.a_t2s = a_t2s
 
     def encode(self, puzzle: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Return ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)`` on ``puzzle`` device."""
+        """Return ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)`` on ``poles`` device."""
+        # Model buffers are the device source of truth (compile + .cuda() path).
+        device = self.poles.device
+        dtype = self.poles.dtype
         x0, y0, is_clue = init_bipartite_state(
             puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
         )
-        device = puzzle.device
-        dtype = x0.dtype
         return (
             x0,
             is_clue,
             self.pe.to(device=device, dtype=dtype),
             self.a_s2t.to(device=device, dtype=dtype),
             self.a_t2s.to(device=device, dtype=dtype),
-            self.poles.to(device=device, dtype=dtype),
+            self.poles,
             y0,
         )
 
@@ -195,19 +196,25 @@ def init_bipartite_state(
     ``(B,81,D)``, ``(B,27,M)``, ``(B,81)`` bool. ``y`` is a plain tensor (not
     ``nn.Parameter``). After renorm, clues keep ``‖x[:9]‖≈0.970`` with PE mass
     in ``9:15``.
+
+    Device: ``poles`` (model buffer) is canonical — ``puzzle`` / ``pe`` / ``is_clue``
+    are moved onto ``poles.device`` so ``torch.compile`` + CUDA cannot leave
+    ``is_clue`` on CPU while ``pole_x`` lives on ``cuda:0``.
     """
-    b = puzzle.shape[0]
-    device = puzzle.device
+    device = poles.device
     dtype = poles.dtype
+    puzzle = puzzle.to(device=device)
+    pe = pe.to(device=device, dtype=dtype)
+    b = puzzle.shape[0]
     d = poles.shape[-1]
     x = north_pole(d).to(device=device, dtype=dtype).expand(b, 81, d).contiguous().clone()
     is_clue = puzzle > 0
     digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, N_DIGITS - 1)
-    pole_x = poles[digit_idx]  # (B, 81, D)
+    pole_x = poles[digit_idx]  # (B, 81, D) — same device as poles
     x = torch.where(is_clue.unsqueeze(-1), pole_x, x)
 
     # PE into scratch for all cells, then renorm (clue :9 stays ≈ ETF after renorm).
-    pe_b = pe.to(device=device, dtype=dtype).unsqueeze(0).expand(b, -1, -1)
+    pe_b = pe.unsqueeze(0).expand(b, -1, -1)
     scratch = x[..., SCRATCH_START:].clone()
     n_pe = min(pe_b.shape[-1], scratch.shape[-1])
     scratch[..., :n_pe] = scratch[..., :n_pe] + pe_alpha * pe_b[..., :n_pe]
