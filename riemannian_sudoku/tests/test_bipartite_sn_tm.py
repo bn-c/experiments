@@ -572,7 +572,64 @@ def test_soft_forward_aux_losses() -> None:
     assert torch.isfinite(out['loss'])
     assert 'sudoku_graph_purity' in out and 'family_gram_sim' in out
     assert 'routing_entropy' in out
+    assert 'routing_clash' in out
     out['loss'].backward()
     assert model.router.logits.grad is not None
     assert model.router.logits.grad.abs().sum() > 0
+
+
+def test_phi_norm_prevents_shrinkage() -> None:
+    """Unit-std Φ keeps Sinkhorn sharp when AdamW shrinks ‖logits‖ (τ→0.02)."""
+    from riemannian_sudoku.manifold_embed import gt_family_logits
+    from riemannian_sudoku.solver import column_entropy
+
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn')
+    model.router.clear_pins()
+    with torch.no_grad():
+        model.router.logits.copy_(gt_family_logits(2.0))
+        model.router.logits.mul_(1e-3)
+    model.curr_tau.fill_(0.02)
+    _a, _t, p = model.router.get_incidence(model.curr_tau)
+    ent = column_entropy(p).item()
+    assert ent < 0.05, f'entropy={ent} (phi_norm should prevent shrinkage blur)'
+
+
+def test_clash_loss_minimized_on_gt_boxes() -> None:
+    """GT houses + valid one-hot board → clash≈0; random Sinkhorn P → clash>0.08."""
+    from riemannian_sudoku.manifold_embed import gt_family_logits
+    from riemannian_sudoku.solver import claim_clash_loss
+
+    # Valid Sudoku solution (digits 1–9), flat row-major.
+    board = torch.tensor(
+        [
+            1, 2, 3, 4, 5, 6, 7, 8, 9,
+            4, 5, 6, 7, 8, 9, 1, 2, 3,
+            7, 8, 9, 1, 2, 3, 4, 5, 6,
+            2, 3, 4, 5, 6, 7, 8, 9, 1,
+            5, 6, 7, 8, 9, 1, 2, 3, 4,
+            8, 9, 1, 2, 3, 4, 5, 6, 7,
+            3, 4, 5, 6, 7, 8, 9, 1, 2,
+            6, 7, 8, 9, 1, 2, 3, 4, 5,
+            9, 1, 2, 3, 4, 5, 6, 7, 8,
+        ],
+        dtype=torch.long,
+    ).view(1, 81)
+    logits = torch.zeros(1, 81, 9)
+    logits.scatter_(-1, (board - 1).unsqueeze(-1), 20.0)
+
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn')
+    model.router.pin_families(gt_family_logits(2.0), families=[0, 1, 2])
+    model.curr_tau.fill_(0.02)
+    _a, _t, p_gt = model.router.get_incidence(model.curr_tau)
+    clash_gt = claim_clash_loss(p_gt, logits).item()
+    assert clash_gt < 1e-3, f'GT clash={clash_gt}'
+
+    torch.manual_seed(0)
+    model.router.clear_pins()
+    with torch.no_grad():
+        model.router.logits.normal_(0.0, 0.5)
+    model.curr_tau.fill_(0.5)
+    _a, _t, p_rand = model.router.get_incidence(model.curr_tau)
+    clash_rand = claim_clash_loss(p_rand, logits).item()
+    assert clash_rand > 0.08, f'random clash={clash_rand}'
 

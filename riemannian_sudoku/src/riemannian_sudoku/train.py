@@ -333,7 +333,7 @@ def train_cmd(args: argparse.Namespace) -> None:
                 {'params': router_params, 'lr': 0.0, 'weight_decay': 0.0},
             ]
         )
-        logger.info('AdamW two-timescale: VF lr=%.6g; router warm-up 0→5× over 1k', args.lr)
+        logger.info('AdamW two-timescale: VF lr=%.6g; router warm-up 0→5× over 500', args.lr)
     else:
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
@@ -461,8 +461,8 @@ def train_cmd(args: argparse.Namespace) -> None:
             ent_w = float(getattr(args, 'ent_weight', LAMBDA_ENT_DEFAULT)) if ent_on else 0.0
             model.curr_ent_weight.fill_(ent_w)
         if soft and len(opt.param_groups) > 1:
-            # Router LR linear 0→5×lr_vf over first 1k steps (wd=0 group).
-            warm = min(1.0, float(step) / 1000.0)
+            # Router LR linear 0→5×lr_vf over first 500 steps (wd=0 group).
+            warm = min(1.0, float(step) / 500.0)
             opt.param_groups[1]['lr'] = 5.0 * float(args.lr) * warm
 
         out = model(puzzle, solution, mask)
@@ -476,7 +476,7 @@ def train_cmd(args: argparse.Namespace) -> None:
             sched.step()
             # CosineAnnealingLR touches all groups — restore router warm-up LR.
             if soft and len(opt.param_groups) > 1:
-                warm = min(1.0, float(step + 1) / 1000.0)
+                warm = min(1.0, float(step + 1) / 500.0)
                 opt.param_groups[1]['lr'] = 5.0 * float(args.lr) * warm
         step += 1
         if t_steady0 is None and step >= warmup_steps:
@@ -516,6 +516,7 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('logit_scale', 'train/logit_scale'),
             ('routing_tau', 'train/routing_tau'),
             ('routing_entropy', 'train/routing_entropy'),
+            ('routing_clash', 'train/routing_clash'),
             ('house_load_std', 'train/house_load_std'),
             ('family_gram_sim', 'train/family_gram_sim'),
             ('sudoku_graph_purity', 'train/sudoku_graph_purity'),

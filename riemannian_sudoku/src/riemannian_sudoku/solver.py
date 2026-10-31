@@ -32,6 +32,7 @@ CE_GAMMA = 0.9  # → label_smoothing = 1 - γ
 LAMBDA_OMEGA_DEFAULT = 0.0
 LAMBDA_ORTHO_DEFAULT = 0.1
 LAMBDA_ENT_DEFAULT = 0.005
+LAMBDA_CLASH_DEFAULT = 1.0
 ORTHO_MARGIN = 0.25
 TAU_INIT = 0.5
 TAU_MIN = 0.02
@@ -62,6 +63,7 @@ class AttractorCore:
         poles: Tensor,
         *,
         soft: bool = False,
+        permute_families: bool = False,
     ) -> tuple[Tensor, list[Tensor], list[Tensor], list[Tensor], list[Tensor]]:
         """Leapfrog ``K`` steps. Returns ``(x_K, omegas, states, v_tan_sqs, scratch_gates)``."""
         x, y = x0, y0
@@ -71,11 +73,17 @@ class AttractorCore:
         scratch_gates: list[Tensor] = []
         blank_f = (~is_clue).to(dtype=x.dtype)
         blank_denom = blank_f.sum().clamp_min(1.0)
+        # FiLM family-slot shuffle (training+soft only): stop pinned sharp rows/cols
+        # from muting the learnable box slot permanently.
+        a_t2s_u = a_t2s
+        if permute_families and a_t2s.shape[1] == 3:
+            perm = torch.randperm(3, device=a_t2s.device)
+            a_t2s_u = a_t2s[:, perm, :]
         for _ in range(self.num_steps):
             omega = self.vf.omega_hard(x, y, poles, a_s2t, soft=soft)
             omegas.append(omega)
             y = torus_step(y, omega)
-            u, scratch_gate = self.vf.ambient_u_hard(x, y, pe, a_t2s, poles)
+            u, scratch_gate = self.vf.ambient_u_hard(x, y, pe, a_t2s_u, poles)
             scratch_gates.append(scratch_gate)
             v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
             v_sq = v_tan.square().sum(dim=-1)
@@ -152,6 +160,25 @@ def ortho_hinge(p_t2s: Tensor, margin: float = ORTHO_MARGIN) -> Tensor:
     return F.relu(sims - margin).square().sum()
 
 
+def claim_clash_loss(p_t2s: Tensor, logits: Tensor) -> Tensor:
+    """
+    Soft house clash: off-diag cell Gram × detached digit co-claim.
+
+    ``gram_off[k] = P[k]^T P[k]`` with diag zeroed; ``claim_co`` from
+    ``softmax(logits.detach())``. GT houses + valid one-hot board → ≈0.
+    """
+    grams = []
+    for k in range(p_t2s.shape[0]):
+        g = p_t2s[k].T @ p_t2s[k]  # (81, 81)
+        g = g - torch.diag_embed(torch.diagonal(g))
+        grams.append(g)
+    gram_off = torch.stack(grams, dim=0)  # (3, 81, 81)
+    p_det = F.softmax(logits.detach(), dim=-1)  # (B, 81, 9)
+    b = p_det.shape[0]
+    claim_co = torch.einsum('bid,bjd->ij', p_det, p_det) / float(b)
+    return (gram_off * claim_co).sum() / (81.0 * 8.0)
+
+
 def column_entropy(p_t2s: Tensor) -> Tensor:
     """Mean column entropy of ``P_t2s (3,9,81)`` (nats)."""
     p = p_t2s.clamp_min(1e-12)
@@ -195,6 +222,7 @@ class BipartiteSnTmSolver(nn.Module):
         sigma_init: float = 0.5,
         ortho_weight: float = LAMBDA_ORTHO_DEFAULT,
         ent_weight: float = LAMBDA_ENT_DEFAULT,
+        clash_weight: float = LAMBDA_CLASH_DEFAULT,
         ortho_margin: float = ORTHO_MARGIN,
     ) -> None:
         super().__init__()
@@ -209,6 +237,7 @@ class BipartiteSnTmSolver(nn.Module):
         self.omega_weight = float(omega_weight)
         self.ortho_weight = float(ortho_weight)
         self.ent_weight = float(ent_weight)
+        self.clash_weight = float(clash_weight)
         self.ortho_margin = float(ortho_margin)
         self.ce_gamma = float(ce_gamma)
         self.supervise_all_steps = bool(supervise_all_steps)
@@ -286,7 +315,15 @@ class BipartiteSnTmSolver(nn.Module):
             a_t2s=a_t2s,
         )
         x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate(
-            x0, y0, is_clue, pe, a_s2t, a_t2s, poles, soft=soft
+            x0,
+            y0,
+            is_clue,
+            pe,
+            a_s2t,
+            a_t2s,
+            poles,
+            soft=soft,
+            permute_families=(self.training and soft),
         )
         self._last_omegas = omegas
         self._last_is_clue = is_clue
@@ -383,6 +420,7 @@ class BipartiteSnTmSolver(nn.Module):
 
         ortho_loss = omega_k.new_zeros(())
         ent_loss = omega_k.new_zeros(())
+        clash_loss = omega_k.new_zeros(())
         if p_t2s is not None:
             with torch.no_grad():
                 gram_mean, _ = family_gram_sims(p_t2s)
@@ -395,8 +433,10 @@ class BipartiteSnTmSolver(nn.Module):
                 out['house_load_std'] = load.std().detach()
             ortho_loss = ortho_hinge(p_t2s, margin=self.ortho_margin)
             ent_loss = column_entropy(p_t2s)
+            clash_loss = claim_clash_loss(p_t2s, logits)
             out['ortho_loss'] = ortho_loss.detach()
             out['ent_loss'] = ent_loss.detach()
+            out['routing_clash'] = clash_loss.detach()
 
         if solution is None:
             return out
@@ -415,12 +455,13 @@ class BipartiteSnTmSolver(nn.Module):
             task_loss = self._blank_ce(logits, solution, mask, label_smoothing)
 
         omega_kin = omega_k.square().mean()
-        # curr_ent_weight is 0-D buffer (compile-safe); λ_ortho always on when soft.
+        # curr_ent_weight is 0-D buffer (compile-safe); λ_ortho / λ_clash on when soft.
         loss = (
             task_loss
             + self.omega_weight * omega_kin
             + self.ortho_weight * ortho_loss
             + self.curr_ent_weight * ent_loss
+            + self.clash_weight * clash_loss
         )
         out.update(
             {

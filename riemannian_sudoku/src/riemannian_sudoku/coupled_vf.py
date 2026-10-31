@@ -111,8 +111,13 @@ class BipartiteRouter(nn.Module):
             return self.a_s2t_hard, self.a_t2s_hard, p
 
         tau_t = tau if isinstance(tau, Tensor) else torch.tensor(float(tau), device=self.logits.device)
-        tau_t = tau_t.to(device=self.logits.device, dtype=self.logits.dtype)
-        z = _sinkhorn_rect(self.effective_logits(), tau_t, n_iters=self.sinkhorn_iters)
+        tau_t = tau_t.to(device=self.logits.device, dtype=self.logits.dtype).clamp_min(1e-3)
+        # Per-family unit-std so AdamW ‖Φ‖ shrink cannot blur Sinkhorn at small τ.
+        eff = self.effective_logits()
+        phi_mean = eff.mean(dim=(1, 2), keepdim=True)
+        phi_std = eff.std(dim=(1, 2), keepdim=True, unbiased=False).clamp(min=1e-4)
+        phi_norm = (eff - phi_mean) / phi_std
+        z = _sinkhorn_rect(phi_norm, tau_t, n_iters=self.sinkhorn_iters)
         p = z.exp()  # (3,9,81) cols sum 1
         # A_s2t: row-stochastic — NEVER feed rows-sum-9 into house_features.
         a_s2t = (p / 9.0).reshape(27, 81)
