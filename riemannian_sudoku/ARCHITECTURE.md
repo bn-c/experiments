@@ -42,7 +42,7 @@ K_eval peak blank/exact at K=24 (**0.5726** / **0.098**); K≥64 exact=0 but bla
 floor ~0.29 (vs final-CE ~0.21). Softens overshoot vs `d6ffqu57`; **not a tip
 promote** (tip `f7fv0ymk` keeps high-K exact).
 
-### Tip K=32 landing-window CE + kinetic (50k)
+### Tip K=32 landing-window CE + kinetic (`wasxqgo7`, 50k)
 
 Same tip chart, **K=32**, CE only on \(k\in\{29..32\}\), plus landing-window kinetic
 (mean-squares; **no** \(v_x\)):
@@ -55,7 +55,10 @@ Same tip chart, **K=32**, CE only on \(k\in\{29..32\}\), plus landing-window kin
 --supervise-terminal-window 4 --gauge-kinetic-weight 0.15 --kinetic-weight 0
 --constraint-weight 0 --compile` (cooled cosine 50k, batch 128, lr≈1.414e-4).
 Desk: `scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh`.
-W&B name `bipartite-sn-tm-tip-landing-kin-k32-s50000`. Undamped K_eval vs `ca48ruu4`.
+W&B [`wasxqgo7`](https://forge.coreweave.com/wandb/nanodegree-forge/riemannian-sudoku/runs/wasxqgo7).
+best blank **0.6163** @ step **49500** (K=32); undamped K_eval peak at train K
+(exact **0.176**); K=64 blank **0.463** / exact **0.007**; K≥128 exact=0.
+Beats `ca48ruu4` mid-K; **not a tip promote** (tip `f7fv0ymk` keeps high-K exact).
 
 ---
 
