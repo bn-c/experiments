@@ -570,8 +570,11 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('h_S1', 'train/h_S1'),
             ('sudoku_graph_purity_T1', 'train/sudoku_graph_purity_T1'),
             ('sudoku_graph_purity_T2', 'train/sudoku_graph_purity_T2'),
+            ('pooled_top3_purity', 'train/pooled_top3_purity'),
             ('beta_l1', 'train/beta_l1'),
             ('beta_l0', 'train/beta_l0'),
+            ('l_comp', 'train/l_comp'),
+            ('l_h_repel', 'train/l_h_repel'),
         ):
             if key in out:
                 metrics[wandb_key] = float(out[key])
@@ -594,12 +597,13 @@ def train_cmd(args: argparse.Namespace) -> None:
             )
             if 'train/sudoku_graph_purity' in metrics:
                 logger.info(
-                    'step %d routing purity=%.4f T1=%.4f T2=%.4f gamma=%.4f '
+                    'step %d routing purity=%.4f T1=%.4f T2=%.4f top3=%.4f gamma=%.4f '
                     'aS0T1=%.3f aS0T2=%.3f aS1T1=%.3f aS1T2=%.3f hT1=%.3f hT2=%.3f hS1=%.3f',
                     step,
                     metrics.get('train/sudoku_graph_purity', float('nan')),
                     metrics.get('train/sudoku_graph_purity_T1', float('nan')),
                     metrics.get('train/sudoku_graph_purity_T2', float('nan')),
+                    metrics.get('train/pooled_top3_purity', float('nan')),
                     metrics.get('train/curr_gamma', float('nan')),
                     metrics.get('train/alpha_S0_T1', float('nan')),
                     metrics.get('train/alpha_S0_T2', float('nan')),

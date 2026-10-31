@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Phase-3 Gate 3: full_blind 20k — clear_pins(); all four Φ ~ N(0,σ²).
-# Pass: max(purity_T1,T2)≥0.98 + hierarchy; clash/entropy trend down after γ anneal.
+# Phase-3 v3.1 Gate 3: full_blind 20k — clear_pins(); all four Φ ~ N(0,σ²).
+# Early @4k: |Δh_T|>0.4 and |Δα_S0|>0.25. Final: max purity OR pooled_top3 ≥0.98 with loser α low.
 # ONLY run after Gate 2 passes. Stop if this fails — no long run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -29,7 +29,7 @@ mkdir -p "$CKPT"
   echo "ARM=phase3_multibank Gate3 full_blind MultiBank Attractor K=${NUM_STEPS}"
   echo "S0=81xd64 T1/T2=F3x9xm16 S1=9xd32 PE=t2_grid COMPILE=1"
   echo "INIT=${ROUTING_INIT} (all Phi ~N; S1 free)"
-  echo "PASS: max(purity_T1,T2)>=0.98; hierarchy as G2; clash/entropy down after gamma"
+  echo "PASS: @4k |dh|>0.4 & |da_S0|>0.25; @20k max(purity) or pooled_top3>=0.98; loser alpha low"
   echo "----"
 } | tee "$SUMMARY"
 

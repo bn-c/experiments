@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Phase-3 MultiBank sanity (desk, compile ON).
-# Pass: some T* sudoku_graph_purity >= 0.98; redundant depth-sep (|h_S1-h_T*|≈1) or α→0;
-# log 4 alphas + 3 h. Blank not required ≈ hard-A 0.539.
+# Phase-3 v3.1 MultiBank sanity (desk, compile ON).
+# Pass: max(purity_T1,T2) >= 0.98; |h_T1-h_T2| >= 0.8; log 4 alphas + 3 h + pooled_top3.
+# Blank not required ≈ hard-A 0.539.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export WANDB_ENTITY="${WANDB_ENTITY:-nanodegree-forge}"
@@ -30,7 +30,7 @@ mkdir -p "$CKPT"
   echo "ARM=phase3_multibank sanity MultiBank Attractor K=${NUM_STEPS}"
   echo "S0=81xd64 T1/T2=F3x9xm16 S1=9xd32 PE=t2_grid COMPILE=1"
   echo "INIT=${ROUTING_INIT} TAU_HOLD=${TAU_HOLD}"
-  echo "PASS: max(purity_T1,purity_T2)>=0.98; redundant depth-sep or alpha->0; log 4 alphas + 3 h"
+  echo "PASS: max(purity_T1,purity_T2)>=0.98; |h_T1-h_T2|>=0.8; log 4 alphas + 3 h + pooled_top3"
   echo "----"
 } | tee "$SUMMARY"
 
