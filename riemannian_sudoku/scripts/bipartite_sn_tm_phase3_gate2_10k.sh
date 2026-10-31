@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Phase-3 Gate 2: partial_blind 10k — pin S0–T1 families [0,1]; rest ~N(0,σ²).
-# Pass: purity_T1≥0.98 + hierarchy (|h_S1-h_T1|≈1 OR α_S0_T2 drops vs α_S0_T1).
-# Mid-check ~3k if purity stuck <0.85. Blank not gated.
+# Phase-3 v3.1 Gate 2: partial_blind 10k — pin S0–T1 families [0,1]; rest ~N(0,σ²).
+# Pass: purity_T1≥0.98; α_S0_T2<0.20 (fast check ~3–5k OK). Mid-check ~3k if purity stuck <0.85.
 # ONLY run after Phase-3 sanity (gt_pinned) passes. Stop if this fails — do not start Gate 3.
 set -euo pipefail
 cd "$(dirname "$0")/.."

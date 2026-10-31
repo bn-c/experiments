@@ -19,7 +19,8 @@ def geodesic_step(
     is_clue: Tensor,
     *,
     delta_max: float = _DELTA_MAX,
-) -> Tensor:
+    return_v_c: bool = False,
+) -> Tensor | tuple[Tensor, Tensor]:
     """
     Sphere Exp with tanh soft-cap on **tangent** speed (never ambient before project).
 
@@ -31,6 +32,8 @@ def geodesic_step(
       (5) ``cosθ x + sinc(θ/π) v_c``
       (6) normalize
       (7) ``where(is_clue, x0, ·)``
+
+    When ``return_v_c``, also returns post-cap tangent (zeroed on clues) for momentum.
     """
     # (1) project ambient u to T_x — no tanh on ambient.
     xu = (x * u).sum(dim=-1, keepdim=True)
@@ -46,7 +49,31 @@ def geodesic_step(
     # (6)
     y = F.normalize(y, dim=-1, eps=1e-6)
     # (7) clue freeze to init poles
-    return torch.where(is_clue.unsqueeze(-1), x0, y)
+    clue_m = is_clue.unsqueeze(-1)
+    y = torch.where(clue_m, x0, y)
+    if return_v_c:
+        return y, torch.where(clue_m, torch.zeros_like(v_c), v_c)
+    return y
+
+
+def free_sphere_step(
+    x: Tensor,
+    u: Tensor,
+    *,
+    delta_max: float = _DELTA_MAX,
+    return_v_c: bool = False,
+) -> Tensor | tuple[Tensor, Tensor]:
+    """Project-before-cap Exp on the free sphere (no clue freeze); optional post-cap ``v_c``."""
+    xu = (x * u).sum(dim=-1, keepdim=True)
+    v = u - xu * x
+    v_norm = (v.square().sum(dim=-1, keepdim=True) + _EPS_NORM).sqrt()
+    theta = delta_max * torch.tanh(v_norm / delta_max)
+    v_c = v * (theta / v_norm)
+    y = torch.cos(theta) * x + torch.sinc(theta / math.pi) * v_c
+    y = F.normalize(y, dim=-1, eps=1e-6)
+    if return_v_c:
+        return y, v_c
+    return y
 
 
 def torus_step(y: Tensor, omega: Tensor) -> Tensor:
