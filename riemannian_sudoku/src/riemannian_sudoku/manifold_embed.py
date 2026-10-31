@@ -46,11 +46,124 @@ def simplex_etf_poles(n: int = N_DIGITS, d: int = D) -> Tensor:
 
 def clifford_embed(y: Tensor) -> Tensor:
     """
-    Clifford torus lift: unwrapped angles ``(..., M)`` → unit embed ``(..., 2M)``.
+    Clifford torus lift: unwrapped angles ``(..., m)`` → unit embed ``(..., 2m)``.
 
-    ``cat([cos(y), sin(y)], -1) * M^{-1/2}``; ``‖y_emb‖₂ ≡ 1``.
+    ``cat([cos(y), sin(y)], -1) * m^{-1/2}`` with ``m = y.shape[-1]``;
+    ``‖y_emb‖₂ ≡ 1``.
     """
-    return torch.cat([torch.cos(y), torch.sin(y)], dim=-1) * (M**-0.5)
+    m = y.shape[-1]
+    return torch.cat([torch.cos(y), torch.sin(y)], dim=-1) * (m**-0.5)
+
+
+def hard_incidence_from_indices(
+    house_cells: Tensor | None = None,
+    cell_houses: Tensor | None = None,
+    *,
+    n_cells: int = 81,
+    n_houses: int = 27,
+) -> tuple[Tensor, Tensor]:
+    """
+    Build hard bipartite incidence ``(A_s2t, A_t2s)`` from index buffers.
+
+    ``A_s2t`` ∈ R^{H×N} (default 27×81): row-stochastic (entries ``1/9``) for
+    S→T ``house_features``. ``A_t2s`` ∈ R^{N×K_inc×H} (81×3×27) one-hot for
+    T→S concat; houses are blocks ``[0:9, 9:18, 18:27]`` (row/col/box).
+    ``A_t2s`` is the block-structured transpose of hard incidence (Phase 2
+    multi-head routing slots onto the same ``K_inc`` axis).
+    """
+    if house_cells is None:
+        house_cells = house_cell_idx()
+    if cell_houses is None:
+        cell_houses = cell_house_idx()
+    h, c0 = house_cells.shape
+    n, k_inc = cell_houses.shape
+    if h != n_houses or n != n_cells:
+        raise ValueError(
+            f'index shapes ({h},{c0})/({n},{k_inc}) vs n_houses={n_houses} n_cells={n_cells}'
+        )
+    # S→T: each house row averages its C0 cells.
+    a_s2t = torch.zeros(n_houses, n_cells, dtype=torch.float32)
+    house_rows = torch.arange(n_houses).unsqueeze(1).expand(-1, c0)
+    a_s2t[house_rows, house_cells.long()] = 1.0 / float(c0)
+    # T→S: one-hot over houses for each (cell, incidence-slot).
+    a_t2s = torch.zeros(n_cells, k_inc, n_houses, dtype=torch.float32)
+    cell_rows = torch.arange(n_cells).unsqueeze(1).expand(-1, k_inc)
+    slot = torch.arange(k_inc).unsqueeze(0).expand(n_cells, -1)
+    a_t2s[cell_rows, slot, cell_houses.long()] = 1.0
+    return a_s2t, a_t2s
+
+
+class SudokuProblemAdapter:
+    """
+    Sudoku → attractor pack: ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)``.
+
+    Identical to ``init_bipartite_state`` + static hard incidence from indices.
+    Hard clue clamp only; no learned encoder / soft α.
+
+    Stored ``_poles`` / ``_pe`` / ``_a_*`` are CPU fallbacks for unit tests only.
+    Production ``encode`` must pass the solver's **live** registered buffers
+    (``poles=self.poles``, …) — plain refs go stale after ``module.to(cuda)``.
+    """
+
+    def __init__(
+        self,
+        poles: Tensor,
+        pe: Tensor,
+        *,
+        pe_alpha: float = PE_ALPHA,
+        house_cells: Tensor | None = None,
+        cell_houses: Tensor | None = None,
+    ) -> None:
+        self.pe_alpha = pe_alpha
+        # Fallbacks for standalone tests; do not treat as device-tracking buffers.
+        self._poles = poles
+        self._pe = pe
+        a_s2t, a_t2s = hard_incidence_from_indices(house_cells, cell_houses)
+        self._a_s2t = a_s2t
+        self._a_t2s = a_t2s
+
+    # Compat aliases (tests / older call sites).
+    @property
+    def poles(self) -> Tensor:
+        return self._poles
+
+    @property
+    def pe(self) -> Tensor:
+        return self._pe
+
+    @property
+    def a_s2t(self) -> Tensor:
+        return self._a_s2t
+
+    @property
+    def a_t2s(self) -> Tensor:
+        return self._a_t2s
+
+    def encode(
+        self,
+        puzzle: Tensor,
+        *,
+        poles: Tensor | None = None,
+        pe: Tensor | None = None,
+        a_s2t: Tensor | None = None,
+        a_t2s: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Return pack on ``puzzle.device`` using live buffers when provided."""
+        poles = self._poles if poles is None else poles
+        pe = self._pe if pe is None else pe
+        a_s2t = self._a_s2t if a_s2t is None else a_s2t
+        a_t2s = self._a_t2s if a_t2s is None else a_t2s
+        # Batch device wins — never trust a possibly-stale poles.device snapshot.
+        device = puzzle.device
+        dtype = poles.dtype
+        poles = poles.to(device=device, dtype=dtype)
+        pe = pe.to(device=device, dtype=dtype)
+        a_s2t = a_s2t.to(device=device, dtype=dtype)
+        a_t2s = a_t2s.to(device=device, dtype=dtype)
+        x0, y0, is_clue = init_bipartite_state(
+            puzzle, poles, pe, pe_alpha=self.pe_alpha
+        )
+        return x0, is_clue, pe, a_s2t, a_t2s, poles, y0
 
 
 def torus_t3_pe(pe_dim: int = PE_DIM) -> Tensor:
@@ -113,19 +226,26 @@ def init_bipartite_state(
     ``(B,81,D)``, ``(B,27,M)``, ``(B,81)`` bool. ``y`` is a plain tensor (not
     ``nn.Parameter``). After renorm, clues keep ``‖x[:9]‖≈0.970`` with PE mass
     in ``9:15``.
+
+    Device: ``puzzle.device`` is canonical (batch / train loader). ``poles`` and
+    ``pe`` are moved onto it so ``is_clue`` and ``pole_x`` cannot diverge under
+    ``torch.compile`` + CUDA — callers must pass **live** module buffers, not
+    stale CPU snapshots held outside ``nn.Module._buffers``.
     """
-    b = puzzle.shape[0]
     device = puzzle.device
     dtype = poles.dtype
+    poles = poles.to(device=device)
+    pe = pe.to(device=device, dtype=dtype)
+    b = puzzle.shape[0]
     d = poles.shape[-1]
     x = north_pole(d).to(device=device, dtype=dtype).expand(b, 81, d).contiguous().clone()
     is_clue = puzzle > 0
     digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, N_DIGITS - 1)
-    pole_x = poles[digit_idx]  # (B, 81, D)
+    pole_x = poles[digit_idx]  # (B, 81, D) — same device as puzzle
     x = torch.where(is_clue.unsqueeze(-1), pole_x, x)
 
     # PE into scratch for all cells, then renorm (clue :9 stays ≈ ETF after renorm).
-    pe_b = pe.to(device=device, dtype=dtype).unsqueeze(0).expand(b, -1, -1)
+    pe_b = pe.unsqueeze(0).expand(b, -1, -1)
     scratch = x[..., SCRATCH_START:].clone()
     n_pe = min(pe_b.shape[-1], scratch.shape[-1])
     scratch[..., :n_pe] = scratch[..., :n_pe] + pe_alpha * pe_b[..., :n_pe]

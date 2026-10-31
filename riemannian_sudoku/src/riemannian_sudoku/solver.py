@@ -16,9 +16,10 @@ from riemannian_sudoku.manifold_embed import (
     PE_ALPHA,
     PE_DIM,
     SCRATCH_START,
+    SudokuProblemAdapter,
     cell_house_idx,
+    hard_incidence_from_indices,
     house_cell_idx,
-    init_bipartite_state,
     simplex_etf_poles,
     torus_t3_pe,
 )
@@ -30,12 +31,94 @@ CE_GAMMA = 0.9  # → label_smoothing = 1 - γ
 LAMBDA_OMEGA_DEFAULT = 0.0
 
 
+class AttractorCore:
+    """
+    Riemannian factor-graph leapfrog: Kuramoto ω then geodesic Exp, K steps.
+
+    Incidence is hard ``A_s2t`` / ``A_t2s`` (static for all K). Clue freeze is
+    hard ``where(is_clue, x0, ·)``. Not an ``nn.Module`` — holds a ref to the
+    shared ``CoupledVectorField`` so the Sudoku façade keeps the param lock.
+    Gather reference path stays on ``CoupledVectorField``.
+    """
+
+    def __init__(self, vf: CoupledVectorField, num_steps: int = K_DEFAULT) -> None:
+        self.vf = vf
+        self.num_steps = int(num_steps)
+
+    def integrate(
+        self,
+        x0: Tensor,
+        y0: Tensor,
+        is_clue: Tensor,
+        pe: Tensor,
+        a_s2t: Tensor,
+        a_t2s: Tensor,
+        poles: Tensor,
+    ) -> tuple[Tensor, list[Tensor], list[Tensor], list[Tensor], list[Tensor]]:
+        """
+        Leapfrog ``K`` steps on hard incidence.
+
+        Returns ``(x_K, omegas, states, v_tan_sqs, scratch_gates)``.
+        """
+        x, y = x0, y0
+        omegas: list[Tensor] = []
+        states: list[Tensor] = []
+        v_tan_sqs: list[Tensor] = []
+        scratch_gates: list[Tensor] = []
+        blank_f = (~is_clue).to(dtype=x.dtype)
+        blank_denom = blank_f.sum().clamp_min(1.0)
+        for _ in range(self.num_steps):
+            omega = self.vf.omega_hard(x, y, poles, a_s2t)
+            omegas.append(omega)
+            y = torus_step(y, omega)
+            u, scratch_gate = self.vf.ambient_u_hard(x, y, pe, a_t2s, poles)
+            scratch_gates.append(scratch_gate)
+            v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
+            v_sq = v_tan.square().sum(dim=-1)
+            v_tan_sqs.append((v_sq * blank_f).sum() / blank_denom)
+            x = geodesic_step(x, u, x0, is_clue)
+            states.append(x)
+        return x, omegas, states, v_tan_sqs, scratch_gates
+
+    def integrate_gather(
+        self,
+        x0: Tensor,
+        y0: Tensor,
+        is_clue: Tensor,
+        pe: Tensor,
+        house_cells: Tensor,
+        cell_houses: Tensor,
+        poles: Tensor,
+    ) -> tuple[Tensor, list[Tensor], list[Tensor], list[Tensor], list[Tensor]]:
+        """Gather reference leapfrog (parity tests); same ``vf`` weights."""
+        x, y = x0, y0
+        omegas: list[Tensor] = []
+        states: list[Tensor] = []
+        v_tan_sqs: list[Tensor] = []
+        scratch_gates: list[Tensor] = []
+        blank_f = (~is_clue).to(dtype=x.dtype)
+        blank_denom = blank_f.sum().clamp_min(1.0)
+        for _ in range(self.num_steps):
+            omega = self.vf.omega(x, y, poles, house_cells)
+            omegas.append(omega)
+            y = torus_step(y, omega)
+            u, scratch_gate = self.vf.ambient_u(x, y, pe, cell_houses, poles)
+            scratch_gates.append(scratch_gate)
+            v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
+            v_sq = v_tan.square().sum(dim=-1)
+            v_tan_sqs.append((v_sq * blank_f).sum() / blank_denom)
+            x = geodesic_step(x, u, x0, is_clue)
+            states.append(x)
+        return x, omegas, states, v_tan_sqs, scratch_gates
+
+
 class BipartiteSnTmSolver(nn.Module):
     """
-    Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps.
+    Thin Sudoku façade: ``SudokuProblemAdapter`` + ``AttractorCore`` (hard-A).
 
     Readout: unnormalized ``logits = logit_scale · (x[..., :9] @ P[:, :9].T)``
     with ``logit_scale`` init 4, clamp ≤10. Train CE with γ=0.9; ``λ_ω=0`` (log only).
+    Param lock **687 010**.
     """
 
     def __init__(
@@ -71,12 +154,25 @@ class BipartiteSnTmSolver(nn.Module):
         self.dt = 1.0
 
         self.vf = CoupledVectorField(d=d, m=m, h_y=h_y, h_x=h_x, pe_dim=PE_DIM)
+        self.core = AttractorCore(self.vf, num_steps=num_steps)
         self.logit_scale = nn.Parameter(torch.tensor(float(LOGIT_SCALE_INIT)))
 
         self.register_buffer('poles', simplex_etf_poles(N_DIGITS, d), persistent=True)
         self.register_buffer('pe', torus_t3_pe(PE_DIM), persistent=True)
         self.register_buffer('house_cell_idx', house_cell_idx(), persistent=True)
         self.register_buffer('cell_house_idx', cell_house_idx(), persistent=True)
+        a_s2t, a_t2s = hard_incidence_from_indices(
+            self.house_cell_idx, self.cell_house_idx
+        )
+        self.register_buffer('a_s2t', a_s2t, persistent=True)
+        self.register_buffer('a_t2s', a_t2s, persistent=True)
+        self.adapter = SudokuProblemAdapter(
+            self.poles,
+            self.pe,
+            pe_alpha=pe_alpha,
+            house_cells=self.house_cell_idx,
+            cell_houses=self.cell_house_idx,
+        )
 
     def _logits(self, x: Tensor) -> Tensor:
         scale = self.logit_scale.clamp(max=LOGIT_SCALE_MAX)
@@ -84,35 +180,46 @@ class BipartiteSnTmSolver(nn.Module):
 
     def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """
-        Leapfrog ``K`` steps: Kuramoto ω on houses, then geodesic on cells.
+        Leapfrog ``K`` steps via hard-A ``AttractorCore``.
 
         Returns final ``x``, per-step ω list, per-step post-update ``x`` states.
         Stashes blank-only ``v_tan_sq`` and ``scratch_gate`` diags on ``self``.
         """
-        x, y, is_clue = init_bipartite_state(
-            puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
+        # Pass live registered buffers — adapter's stored refs go stale after .to(cuda).
+        x0, is_clue, pe, a_s2t, a_t2s, poles, y0 = self.adapter.encode(
+            puzzle,
+            poles=self.poles,
+            pe=self.pe,
+            a_s2t=self.a_s2t,
+            a_t2s=self.a_t2s,
         )
-        x0 = x
-        omegas: list[Tensor] = []
-        states: list[Tensor] = []
-        v_tan_sqs: list[Tensor] = []
-        scratch_gates: list[Tensor] = []
-        blank_f = (~is_clue).to(dtype=x.dtype)
-        blank_denom = blank_f.sum().clamp_min(1.0)
-        for _ in range(self.num_steps):
-            omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
-            omegas.append(omega)
-            y = torus_step(y, omega)
-            u, scratch_gate = self.vf.ambient_u(
-                x, y, self.pe, self.cell_house_idx, self.poles
-            )
-            scratch_gates.append(scratch_gate)
-            # Blank-only ‖v_tan‖² outside geodesic_step (clue u is unconstrained noise).
-            v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
-            v_sq = v_tan.square().sum(dim=-1)
-            v_tan_sqs.append((v_sq * blank_f).sum() / blank_denom)
-            x = geodesic_step(x, u, x0, is_clue)
-            states.append(x)
+        x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate(
+            x0, y0, is_clue, pe, a_s2t, a_t2s, poles
+        )
+        self._last_omegas = omegas
+        self._last_is_clue = is_clue
+        self._last_v_tan_sqs = v_tan_sqs
+        self._last_scratch_gates = scratch_gates
+        return x, omegas, states
+
+    def integrate_gather(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """Gather reference integrate (parity tests); shares ``vf`` weights."""
+        x0, is_clue, pe, _a_s2t, _a_t2s, poles, y0 = self.adapter.encode(
+            puzzle,
+            poles=self.poles,
+            pe=self.pe,
+            a_s2t=self.a_s2t,
+            a_t2s=self.a_t2s,
+        )
+        x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate_gather(
+            x0,
+            y0,
+            is_clue,
+            pe,
+            self.house_cell_idx,
+            self.cell_house_idx,
+            poles,
+        )
         self._last_omegas = omegas
         self._last_is_clue = is_clue
         self._last_v_tan_sqs = v_tan_sqs
