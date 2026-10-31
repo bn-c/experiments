@@ -42,6 +42,24 @@ K_eval peak blank/exact at K=24 (**0.5726** / **0.098**); K≥64 exact=0 but bla
 floor ~0.29 (vs final-CE ~0.21). Softens overshoot vs `d6ffqu57`; **not a tip
 promote** (tip `f7fv0ymk` keeps high-K exact).
 
+### Tip K=32 landing-window CE + kinetic (`wasxqgo7`, 50k)
+
+Same tip chart, **K=32**, CE only on \(k\in\{29..32\}\), plus landing-window kinetic
+(mean-squares; **no** \(v_x\)):
+\[
+\mathcal{L}_{\mathrm{kin}}=\lambda_{\mathrm{kin}}\sum_{k=K-3}^{K}
+\bigl(\|\omega_{y,k}\|^2+\|\omega_{z,k}\|^2+\|v_{c,k}\|^2\bigr),\quad
+\lambda_{\mathrm{kin}}=0.15.
+\]
+**CLI:** `--mixer bipartite_sn_tm --use-global-torus --num-steps 32
+--supervise-terminal-window 4 --gauge-kinetic-weight 0.15 --kinetic-weight 0
+--constraint-weight 0 --compile` (cooled cosine 50k, batch 128, lr≈1.414e-4).
+Desk: `scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh`.
+W&B [`wasxqgo7`](https://forge.coreweave.com/wandb/nanodegree-forge/riemannian-sudoku/runs/wasxqgo7).
+best blank **0.6163** @ step **49500** (K=32); undamped K_eval peak at train K
+(exact **0.176**); K=64 blank **0.463** / exact **0.007**; K≥128 exact=0.
+Beats `ca48ruu4` mid-K; **not a tip promote** (tip `f7fv0ymk` keeps high-K exact).
+
 ---
 
 ## 1. What the model is
@@ -127,12 +145,14 @@ Hazard-locked Exp; `x0`/`is_clue` optional (skip freeze when omitted). Tip freez
 
 - Blank CE (\(\gamma=0.9\)); optional `--supervise-all-steps` linear ramp; optional
   `--supervise-terminal-window N` (uniform CE on last \(N\) steps only; overrides ramp).
-- Velocity brake: `--gauge-kinetic-weight` → \(\lambda_{\mathrm{brake}}\) on
-  \(\|\omega_{y,K}\|^2+\|\omega_{z,K}\|^2+\|v_{x,K}\|^2+\|v_{c,K}\|^2\) (mean squares).
+- Landing-window kinetic (`N>0`): `--gauge-kinetic-weight` → \(\lambda_{\mathrm{kin}}\) on
+  \(\sum_{k=K-N+1}^{K}(\|\omega_{y,k}\|^2+\|\omega_{z,k}\|^2+\|v_{c,k}\|^2)\) (no \(v_x\)).
+  Legacy `N=0`: single-step brake including \(\|v_{x,K}\|^2\).
 - `scratch_energy` = \((1 - c_{\ldots,6}).\mathrm{mean()}\) (rest-axis displacement; **not** \(\|c\|^2\equiv 1/55\)).
 - `blank_np` = mean \(x_8^2\); `claim_energy` = mean \(\mathrm{relu}(x P^\top)^2\) (watch-only).
 - `omega_sq_1` / `omega_sq_k` from **\(\omega_y\)**; tip also `omega_z_sq_*`;
-  `v_x_sq_k` / `v_c_sq_k` / `brake_loss` for terminal ambients.
+  `v_x_sq_k` / `v_c_sq_k` / `brake_loss`; landing also `landing_omega_y_sq` /
+  `landing_v_c_sq` (window means).
 
 ---
 
@@ -141,6 +161,7 @@ Hazard-locked Exp; `x0`/`is_clue` optional (skip freeze when omitted). Tip freez
 - Tip 10k: [`scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh`](scripts/bipartite_sn_tm_product_chart_global_t16_10k.sh)
 - Tip K16 final-CE 50k: [`scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh`](scripts/bipartite_sn_tm_tip_k16_finalce_50k.sh)
 - Tip K16 terminal-window + brake 10k: [`scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh`](scripts/bipartite_sn_tm_tip_terminal_brake_10k.sh)
+- Tip K32 landing-window + kinetic 50k: [`scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh`](scripts/bipartite_sn_tm_tip_landing_kin_k32_50k.sh)
 - Full train: [`scripts/full_train.sh`](scripts/full_train.sh)
 - Post-hoc K_eval: [`scripts/bipartite_sn_tm_keval.py`](scripts/bipartite_sn_tm_keval.py)
 - Post-hoc solved strat: [`scripts/bipartite_sn_tm_solved_strat.py`](scripts/bipartite_sn_tm_solved_strat.py)

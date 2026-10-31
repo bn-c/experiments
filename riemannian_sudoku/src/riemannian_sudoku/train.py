@@ -459,6 +459,8 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('v_x_sq_k', 'train/v_x_sq_k'),
             ('v_c_sq_k', 'train/v_c_sq_k'),
             ('brake_loss', 'train/brake'),
+            ('landing_omega_y_sq', 'train/landing_omega_y_sq'),
+            ('landing_v_c_sq', 'train/landing_v_c_sq'),
             ('scratch_energy', 'train/scratch_energy'),
             ('blank_np', 'train/blank_np'),
             ('claim_energy', 'train/claim_energy'),
@@ -740,8 +742,10 @@ def main() -> None:
         type=float,
         default=0.0,
         help=(
-            'λ_g / λ_brake: cross_coupled gauge kinetic; bipartite_sn_tm terminal velocity '
-            'brake λ(‖ω_y,K‖²+‖ω_z,K‖²+‖v_x,K‖²+‖v_c,K‖²) (0=off)'
+            'λ_g / λ_kin: cross_coupled gauge kinetic; bipartite_sn_tm with '
+            '--supervise-terminal-window N>0: landing-window '
+            'λ Σ(‖ω_y‖²+‖ω_z‖²+‖v_c‖²) over last N steps (no v_x); '
+            'else single-step brake incl. v_x (0=off)'
         ),
     )
     t.add_argument('--constraint-weight', type=float, default=0.1, help='λ_c on unit-sum MSE')

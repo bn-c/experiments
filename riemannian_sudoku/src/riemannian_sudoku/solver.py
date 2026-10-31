@@ -43,8 +43,9 @@ class BipartiteSnTmSolver(nn.Module):
     zeros early-step CE (``w_k=0`` for ``k≤K-N``). Takes precedence over
     ``supervise_all_steps``.
 
-    ``omega_weight`` / λ_brake: terminal velocity brake
-    ``λ(‖ω_y,K‖²+‖ω_z,K‖²+‖v_x,K‖²+‖v_c,K‖²)`` (mean squares).
+    ``omega_weight`` / λ_kin with ``N>0``: landing-window kinetic
+    ``λ Σ_{k=K-N+1..K}(‖ω_y,k‖²+‖ω_z,k‖²+‖v_c,k‖²)`` (no ``v_x``; digits settle via CE).
+    With ``N=0``: single-step brake including ``‖v_x,K‖²`` (legacy).
     """
 
     def __init__(
@@ -108,14 +109,14 @@ class BipartiteSnTmSolver(nn.Module):
         list[Tensor],
         list[Tensor],
         list[Tensor | None],
-        Tensor,
-        Tensor,
+        list[Tensor],
+        list[Tensor],
     ]:
         """
         Leapfrog ``K`` steps: ω on houses (+ global), then geodesic on ``x`` and ``c``.
 
         Returns final ``x``, ``c``, per-step ``ω_y``, post-update ``x`` states, per-step
-        ``ω_z``, and terminal ambient velocities ``(u_x,K, u_c,K)``.
+        ``ω_z``, and per-step ambient velocities ``(u_x, u_c)``.
         """
         x, c, y, z, is_clue = init_bipartite_state(
             puzzle,
@@ -129,8 +130,8 @@ class BipartiteSnTmSolver(nn.Module):
         omegas: list[Tensor] = []
         omega_zs: list[Tensor | None] = []
         states: list[Tensor] = []
-        u_x = x.new_zeros(())
-        u_c = c.new_zeros(())
+        u_xs: list[Tensor] = []
+        u_cs: list[Tensor] = []
         for _ in range(self.num_steps):
             omega_y, omega_z = self.vf.omega(x, c, y, z, self.house_cell_idx)
             omegas.append(omega_y)
@@ -141,6 +142,8 @@ class BipartiteSnTmSolver(nn.Module):
             u_x, u_c = self.vf.ambient_u(
                 x, c, y, z, self.pe, is_clue, self.cell_house_idx
             )
+            u_xs.append(u_x)
+            u_cs.append(u_c)
             x = geodesic_step(x, u_x, x0, is_clue)
             c = geodesic_step(c, u_c, c0, is_clue)
             states.append(x)
@@ -148,7 +151,7 @@ class BipartiteSnTmSolver(nn.Module):
         self._last_omega_zs = omega_zs
         self._last_is_clue = is_clue
         self._last_c = c
-        return x, c, omegas, states, omega_zs, u_x, u_c
+        return x, c, omegas, states, omega_zs, u_xs, u_cs
 
     @staticmethod
     def _blank_ce(logits: Tensor, solution: Tensor, mask: Tensor, label_smoothing: float) -> Tensor:
@@ -174,12 +177,14 @@ class BipartiteSnTmSolver(nn.Module):
         solution: Tensor | None = None,
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        x, c, omegas, states, omega_zs, u_x_k, u_c_k = self.integrate(puzzle)
+        x, c, omegas, states, omega_zs, u_xs, u_cs = self.integrate(puzzle)
         logits = self._logits(x)
         pred = logits.argmax(dim=-1) + 1
 
         omega1 = omegas[0]
         omega_k = omegas[-1]
+        u_x_k = u_xs[-1]
+        u_c_k = u_cs[-1]
         omega_y_sq = omega_k.square().mean()
         v_x_sq = u_x_k.square().mean()
         v_c_sq = u_c_k.square().mean()
@@ -222,7 +227,7 @@ class BipartiteSnTmSolver(nn.Module):
         label_smoothing = max(0.0, 1.0 - self.ce_gamma)
         win = self.supervise_terminal_window
         if win > 0:
-            # Terminal-window CE: w_k=0 outside last ``win`` steps; uniform inside.
+            # Landing-window CE: w_k=0 outside last ``win`` steps; uniform inside.
             n = min(win, len(states))
             ces = torch.stack(
                 [
@@ -231,6 +236,28 @@ class BipartiteSnTmSolver(nn.Module):
                 ]
             )
             task_loss = ces.mean()
+            # L_kin = Σ_{last n}(‖ω_y‖²+‖ω_z‖²+‖v_c‖²); no v_x (digits settle via CE).
+            kin_parts: list[Tensor] = []
+            for i in range(len(omegas) - n, len(omegas)):
+                oy = omegas[i].square().mean()
+                oz = (
+                    omega_zs[i].square().mean()
+                    if self.use_global_torus and omega_zs[i] is not None
+                    else oy.new_zeros(())
+                )
+                vc = u_cs[i].square().mean()
+                kin_parts.append(oy + oz + vc)
+            brake = torch.stack(kin_parts).sum()
+            out['landing_omega_y_sq'] = (
+                torch.stack([omegas[i].square().mean() for i in range(len(omegas) - n, len(omegas))])
+                .mean()
+                .detach()
+            )
+            out['landing_v_c_sq'] = (
+                torch.stack([u_cs[i].square().mean() for i in range(len(u_cs) - n, len(u_cs))])
+                .mean()
+                .detach()
+            )
         elif self.supervise_all_steps:
             ces = torch.stack(
                 [self._blank_ce(self._logits(st), solution, mask, label_smoothing) for st in states]
@@ -238,11 +265,11 @@ class BipartiteSnTmSolver(nn.Module):
             k = ces.shape[0]
             w = torch.arange(1, k + 1, device=ces.device, dtype=ces.dtype)
             task_loss = (ces * w).sum() / w.sum()
+            brake = omega_y_sq + omega_z_sq + v_x_sq + v_c_sq
         else:
             task_loss = self._blank_ce(logits, solution, mask, label_smoothing)
-
-        # Velocity brake: λ(‖ω_y,K‖² + ‖ω_z,K‖² + ‖v_x,K‖² + ‖v_c,K‖²).
-        brake = omega_y_sq + omega_z_sq + v_x_sq + v_c_sq
+            # Legacy single-step brake (includes v_x).
+            brake = omega_y_sq + omega_z_sq + v_x_sq + v_c_sq
         loss = task_loss + self.omega_weight * brake
         out.update(
             {

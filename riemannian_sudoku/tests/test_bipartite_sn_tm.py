@@ -247,12 +247,12 @@ def test_terminal_window_ce_ignores_early_steps() -> None:
 
 
 def test_velocity_brake_adds_lambda_times_four_energies() -> None:
-    """λ_brake multiplies ‖ω_y‖²+‖ω_z‖²+‖v_x‖²+‖v_c‖² into loss."""
+    """N=0 legacy: λ_brake multiplies ‖ω_y‖²+‖ω_z‖²+‖v_x‖²+‖v_c‖² into loss."""
     torch.manual_seed(8)
     puzzle = torch.randint(0, 10, (2, 81))
     solution = torch.randint(1, 10, (2, 81))
-    off = BipartiteSnTmSolver(num_steps=2, omega_weight=0.0)
-    on = BipartiteSnTmSolver(num_steps=2, omega_weight=0.01)
+    off = BipartiteSnTmSolver(num_steps=2, omega_weight=0.0, supervise_terminal_window=0)
+    on = BipartiteSnTmSolver(num_steps=2, omega_weight=0.01, supervise_terminal_window=0)
     with torch.no_grad():
         on.load_state_dict(off.state_dict())
     a = off(puzzle, solution)
@@ -267,14 +267,37 @@ def test_velocity_brake_adds_lambda_times_four_energies() -> None:
     b['loss'].backward()
 
 
+def test_landing_window_kinetic_sums_omega_vc_no_vx() -> None:
+    """N>0: L_kin = Σ_window(‖ω_y‖²+‖ω_z‖²+‖v_c‖²); λ=0.15; no v_x in sum."""
+    torch.manual_seed(9)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    off = BipartiteSnTmSolver(num_steps=4, omega_weight=0.0, supervise_terminal_window=4)
+    on = BipartiteSnTmSolver(num_steps=4, omega_weight=0.15, supervise_terminal_window=4)
+    with torch.no_grad():
+        on.load_state_dict(off.state_dict())
+    a = off(puzzle, solution)
+    b = on(puzzle, solution)
+    assert torch.allclose(a['task_loss'], b['task_loss'], atol=1e-6)
+    expected = a['task_loss'] + 0.15 * a['brake_loss']
+    assert torch.allclose(b['loss'], expected, atol=1e-5)
+    # Landing kin ≠ single-step four-energy brake (no v_x; sums over window).
+    single = a['omega_sq_k'] + a['omega_z_sq_k'] + a['v_x_sq_k'] + a['v_c_sq_k']
+    assert not torch.allclose(a['brake_loss'], single, atol=1e-4)
+    assert float(a['brake_loss']) > float(a['v_c_sq_k'])  # at least multi-step or ω terms
+    assert 'landing_omega_y_sq' in a and 'landing_v_c_sq' in a
+    assert float(a['landing_v_c_sq']) > 0.0
+    b['loss'].backward()
+
+
 def test_build_solver_terminal_window_and_brake() -> None:
     m = build_solver(
         'bipartite_sn_tm',
-        num_steps=16,
-        gauge_kinetic_weight=0.01,
+        num_steps=32,
+        gauge_kinetic_weight=0.15,
         supervise_terminal_window=4,
     )
     assert isinstance(m, BipartiteSnTmSolver)
     assert m.supervise_terminal_window == 4
-    assert m.omega_weight == 0.01
+    assert m.omega_weight == 0.15
     assert not m.supervise_all_steps
