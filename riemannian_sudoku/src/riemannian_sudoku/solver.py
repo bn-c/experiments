@@ -25,7 +25,7 @@ from riemannian_sudoku.manifold_embed import (
 
 K_DEFAULT = 8
 LOGIT_SCALE_INIT = 4.0
-LOGIT_SCALE_MAX = 50.0
+LOGIT_SCALE_MAX = 10.0
 CE_GAMMA = 0.9  # → label_smoothing = 1 - γ
 LAMBDA_OMEGA_DEFAULT = 0.0
 
@@ -35,7 +35,7 @@ class BipartiteSnTmSolver(nn.Module):
     Shared VF, leapfrog ``Y→X``, ``K`` geodesic / torus steps.
 
     Readout: unnormalized ``logits = logit_scale · (x[..., :9] @ P[:, :9].T)``
-    with ``logit_scale`` init 4, clamp ≤50. Train CE with γ=0.9; ``λ_ω=0`` (log only).
+    with ``logit_scale`` init 4, clamp ≤10. Train CE with γ=0.9; ``λ_ω=0`` (log only).
     """
 
     def __init__(

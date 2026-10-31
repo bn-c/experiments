@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -21,7 +23,7 @@ from riemannian_sudoku.manifold_embed import (
     torus_t3_pe,
 )
 from riemannian_sudoku.model import build_solver
-from riemannian_sudoku.solver import BipartiteSnTmSolver
+from riemannian_sudoku.solver import LOGIT_SCALE_MAX, BipartiteSnTmSolver
 
 
 def test_static_index_buffers() -> None:
@@ -37,6 +39,13 @@ def test_householder_etf_orthogonal_to_blank() -> None:
     poles = simplex_etf_poles()
     assert poles.shape == (9, D)
     assert torch.allclose(poles.norm(dim=-1), torch.ones(9), atol=1e-5)
+    # Householder H: n_hat = 1/√9 ↦ +e_8 (not −e_8).
+    n_hat = torch.ones(N_DIGITS) / math.sqrt(float(N_DIGITS))
+    e_blank9 = torch.zeros(N_DIGITS)
+    e_blank9[BLANK_COORD] = 1.0
+    v = n_hat - e_blank9
+    H = torch.eye(N_DIGITS) - 2.0 * torch.outer(v, v) / (v @ v)
+    assert torch.allclose(H @ n_hat, e_blank9, atol=1e-6)
     # Householder: blank axis cleared; ⟨e_8, poles[d]⟩ = 0
     assert poles[:, BLANK_COORD].abs().max() < 1e-6
     e8 = north_pole()
@@ -63,8 +72,11 @@ def test_simplex_etf_and_north_pole_init() -> None:
     assert x.shape == (1, 81, D) and y.shape == (1, 27, M)
     assert torch.allclose(x.norm(dim=-1), torch.ones(1, 81), atol=1e-4)
     assert bool(is_clue[0, 1]) and not bool(is_clue[0, 0])
-    # Clue digit 5 → pole index 4
-    assert torch.allclose(x[0, 1], poles[4], atol=1e-5)
+    # PE on all cells: clue :9 matches ETF after renorm; scratch 9:15 nonzero.
+    clue_sem = F.normalize(x[0, 1, :N_DIGITS], dim=-1, eps=1e-6)
+    assert torch.allclose(clue_sem, poles[4, :N_DIGITS], atol=1e-5)
+    assert x[0, 1, SCRATCH_START : SCRATCH_START + 6].abs().max() > 0
+    assert not torch.allclose(x[0, 1], poles[4], atol=1e-3)
     # Blank has mass on North Pole coord (PE is scratch-only).
     assert x[0, 0, BLANK_COORD] > 0.5
 
@@ -167,7 +179,7 @@ def test_kuramoto_fixed_point_zero_omega() -> None:
 
 
 def test_closed_gate_idle_at_pole() -> None:
-    """gate≈0 ⇒ u[...,8:]=0; at ETF pole with radial u_etf ⇒ v_tan≈0 and x_next≈x."""
+    """gate≈0 ⇒ u[...,9:]=0; u_8=0 at ETF pole ⇒ v_tan≈0 and x_next≈x."""
     from riemannian_sudoku.coupled_vf import CoupledVectorField
 
     torch.manual_seed(6)
@@ -178,9 +190,11 @@ def test_closed_gate_idle_at_pole() -> None:
     digit = 3
     x = poles[digit].view(1, 1, D).expand(1, 81, D).contiguous()
     y = torch.zeros(1, 27, M, dtype=torch.float64)
-    # Head: radial u_raw (=x at pole) + gate logit −100 → gate≈0, u[...,8:]=0.
+    # Head: radial u_raw (=x at pole), force u_8=0, gate logit −100 → gate≈0.
+    # Ungated NP e_8 would otherwise create tangent if u_8≠0 while x_8≈0.
     raw = torch.zeros(1, 81, D + 1, dtype=torch.float64)
     raw[..., :D] = x
+    raw[..., BLANK_COORD] = 0.0
     raw[..., D] = -100.0
 
     class _FixedHead(torch.nn.Module):
@@ -190,7 +204,8 @@ def test_closed_gate_idle_at_pole() -> None:
     vf.vf_x_body = _FixedHead()
     u, gate = vf.ambient_u(x, y, pe, c_idx, poles)
     assert gate.max() < 1e-6
-    assert u[..., 8:].abs().max() < 1e-6
+    assert u[..., SCRATCH_START:].abs().max() < 1e-6
+    assert u[..., BLANK_COORD].abs().max() < 1e-6
     v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
     assert v_tan.norm(dim=-1).max() < 1e-6
     is_clue = torch.zeros(1, 81, dtype=torch.bool)
@@ -209,13 +224,14 @@ def test_build_solver_bipartite_and_resolve() -> None:
 
 
 def test_logit_scale_clamp() -> None:
+    assert LOGIT_SCALE_MAX == 10.0
     model = BipartiteSnTmSolver(num_steps=1)
     with torch.no_grad():
         model.logit_scale.fill_(100.0)
     puzzle = torch.zeros(1, 81, dtype=torch.long)
     logits = model(puzzle)['logits']
-    # scale clamped to 50; on S^{63}, ||x[...,:9]||≤1 and ||P[:,:9]||=1 → |logit| ≤ 50
-    assert logits.abs().max() <= 50.0 + 1e-4
+    # scale clamped to 10; on S^{63}, ||x[...,:9]||≤1 and ||P[:,:9]||=1 → |logit| ≤ 10
+    assert logits.abs().max() <= LOGIT_SCALE_MAX + 1e-4
 
 
 def test_logits_unnormalized_matches_raw_dot() -> None:
@@ -226,11 +242,15 @@ def test_logits_unnormalized_matches_raw_dot() -> None:
     raw_x[SCRATCH_START] = 0.7
     x = F.normalize(raw_x, dim=-1).view(1, 1, -1).expand(1, 81, -1)
     assert float(x[..., :N_DIGITS].norm(dim=-1).mean()) < 0.5
-    expected = model.logit_scale.clamp(max=50.0) * (x[..., :N_DIGITS] @ model.poles[:, :N_DIGITS].T)
+    expected = model.logit_scale.clamp(max=LOGIT_SCALE_MAX) * (
+        x[..., :N_DIGITS] @ model.poles[:, :N_DIGITS].T
+    )
     got = model._logits(x)
     assert torch.allclose(got, expected, atol=1e-6)
     x_dec = F.normalize(x[..., :N_DIGITS], dim=-1, eps=1e-6)
-    sliced = model.logit_scale.clamp(max=50.0) * (x_dec @ model.poles[:, :N_DIGITS].T)
+    sliced = model.logit_scale.clamp(max=LOGIT_SCALE_MAX) * (
+        x_dec @ model.poles[:, :N_DIGITS].T
+    )
     assert not torch.allclose(got, sliced, atol=1e-3)
 
 

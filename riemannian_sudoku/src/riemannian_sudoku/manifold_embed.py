@@ -108,9 +108,11 @@ def init_bipartite_state(
     """
     Lift puzzle digits onto ``S^{D-1}`` and init house angles at ``π/4`` on ``T^M``.
 
-    Clues ← ETF pole for digit; blanks ← North Pole + ``α·PE`` into scratch, then
-    normalize. Returns ``(x, y, is_clue)`` with shapes ``(B,81,D)``, ``(B,27,M)``,
-    ``(B,81)`` bool. ``y`` is a plain tensor (not ``nn.Parameter``).
+    Clues ← ETF pole for digit; blanks ← North Pole; then ``α·PE`` into scratch
+    for **every** cell and L2-normalize. Returns ``(x, y, is_clue)`` with shapes
+    ``(B,81,D)``, ``(B,27,M)``, ``(B,81)`` bool. ``y`` is a plain tensor (not
+    ``nn.Parameter``). After renorm, clues keep ``‖x[:9]‖≈0.970`` with PE mass
+    in ``9:15``.
     """
     b = puzzle.shape[0]
     device = puzzle.device
@@ -122,13 +124,11 @@ def init_bipartite_state(
     pole_x = poles[digit_idx]  # (B, 81, D)
     x = torch.where(is_clue.unsqueeze(-1), pole_x, x)
 
-    # PE into scratch for blanks only, then renorm all (clues already unit poles).
+    # PE into scratch for all cells, then renorm (clue :9 stays ≈ ETF after renorm).
     pe_b = pe.to(device=device, dtype=dtype).unsqueeze(0).expand(b, -1, -1)
     scratch = x[..., SCRATCH_START:].clone()
     n_pe = min(pe_b.shape[-1], scratch.shape[-1])
-    scratch_pe = scratch.clone()
-    scratch_pe[..., :n_pe] = scratch[..., :n_pe] + pe_alpha * pe_b[..., :n_pe]
-    scratch = torch.where(is_clue.unsqueeze(-1), scratch, scratch_pe)
+    scratch[..., :n_pe] = scratch[..., :n_pe] + pe_alpha * pe_b[..., :n_pe]
     x = torch.cat([x[..., :SCRATCH_START], scratch], dim=-1)
     x = F.normalize(x, dim=-1, eps=1e-6)
 

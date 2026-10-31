@@ -14,7 +14,7 @@ from riemannian_sudoku.manifold_embed import (
     clifford_embed,
 )
 
-# Soft-cap amplitude for Kuramoto ω (hazard 3: discrete overshoot).
+# Soft-cap amplitude for Kuramoto ω (Option A: R-normalized; effective max≈0.83).
 _OMEGA_CAP = 1.25
 
 
@@ -31,7 +31,7 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
 class CoupledVectorField(nn.Module):
     """
     Leapfrog pair: Kuramoto house ω from cell aggregates + Clifford ``y_emb``,
-    then cell ambient u via FiLM → signed ETF + gated NP/scratch.
+    then cell ambient u via FiLM → ungated semantic ``:9`` + gated scratch ``9:``.
 
     Bulletproof attractor ~687k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
     ``M=16``, ``in_y=178``, ``vf_y`` out ``2M``, ``vf_x_body`` out ``D+1``.
@@ -94,18 +94,22 @@ class CoupledVectorField(nn.Module):
         house_cell_idx: Tensor,
     ) -> Tensor:
         """
-        Kuramoto house angular velocity ``(B, 27, M)``, soft-capped.
+        Kuramoto house angular velocity ``(B, 27, M)``, R-normalized soft-cap.
 
         MLP emits ``(c_cos, c_sin)``; ``ω_raw = c_sin·cos(y) - c_cos·sin(y)``,
-        then ``ω = A·tanh(ω_raw/A)`` with ``A=1.25``. Fixed point when
-        ``y = atan2(c_sin, c_cos)`` ⇒ ``ω_raw ≈ 0`` ⇒ ``ω ≈ 0``.
+        ``c_norm = √(c_cos²+c_sin²+1)``, then
+        ``ω = A·tanh(ω_raw/(A·c_norm))`` with ``A=1.25`` (effective max
+        ≈ ``1.25·tanh(0.8)≈0.83``). Near the fixed point
+        ``y = atan2(c_sin, c_cos)`` ⇒ ``ω_raw ≈ 0`` ⇒ ``ω ≈ 0`` with slope
+        ``R/√(R²+1) < 1``.
         """
         feat = self.house_features(x, poles, house_cell_idx)
         y_emb = clifford_embed(y)
         raw = self.vf_y(torch.cat([feat, y_emb], dim=-1))
         c_cos, c_sin = raw.split(self.m, dim=-1)
+        c_norm = (c_cos.square() + c_sin.square()).add(1.0).sqrt()
         omega_raw = c_sin * torch.cos(y) - c_cos * torch.sin(y)
-        return _OMEGA_CAP * torch.tanh(omega_raw / _OMEGA_CAP)
+        return _OMEGA_CAP * torch.tanh(omega_raw / (_OMEGA_CAP * c_norm))
 
     def ambient_u(
         self,
@@ -116,10 +120,10 @@ class CoupledVectorField(nn.Module):
         poles: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """
-        Cell ambient velocity ``(B, 81, D)`` via FiLM → signed ETF + gated transient.
+        Cell ambient velocity ``(B, 81, D)`` via FiLM → ungated semantic + gated scratch.
 
-        Head ``D+1``: ``u_raw`` (D) + gate logit. ETF span = coords ``0..7``
-        (signed, no softplus); gate ``σ(g+2)`` multiplies NP+scratch ``8..``.
+        Head ``D+1``: ``u_raw`` (D) + gate logit. Semantic ``0..8`` (ETF + NP
+        ``e_8``) is ungated/signed; gate ``σ(g+2)`` multiplies scratch ``9..`` only.
         ``poles`` unused (API parity with callers). Returns ``(u, gate)``.
         """
         del poles  # house ETF poles unused; ambient is signed coord head
@@ -134,8 +138,8 @@ class CoupledVectorField(nn.Module):
 
         u_raw, g_raw = raw[..., : self.d], raw[..., self.d]
         gate = torch.sigmoid(g_raw + 2.0)  # ~0.88 open at init
-        # Householder ETF span = coords 0..7; NP e_8 + scratch 9..63 gated.
-        u_etf = u_raw[..., :8]
-        u_transient = gate.unsqueeze(-1) * u_raw[..., 8:]
-        u = torch.cat([u_etf, u_transient], dim=-1)
+        # ETF 0..7 + NP e_8 ungated; scratch 9..63 gated.
+        u_semantic = u_raw[..., :9]
+        u_scratch = gate.unsqueeze(-1) * u_raw[..., 9:]
+        u = torch.cat([u_semantic, u_scratch], dim=-1)
         return u, gate
