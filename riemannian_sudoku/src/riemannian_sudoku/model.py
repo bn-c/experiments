@@ -27,7 +27,7 @@ _CROSS_H = 512
 _MLP_ACTIVATIONS = ('gelu', 'silu', 'swiglu')
 _MLP_WIDTHS = ('default', 'expand')
 _MIXERS = ('euclid_axial', 'cross_coupled', 'geo_karcher', 'geo_log', 'geo_transformer')
-_ALL_MIXERS = _MIXERS + ('bipartite_sn_tm',)
+_ALL_MIXERS = _MIXERS + ('bipartite_sn_tm', 'multibank_attractor')
 _GEO_MIXERS = ('geo_karcher', 'geo_log')
 _GEO_TF_LAYERS = 2
 _GEO_KARCHER_STEPS = 2
@@ -617,7 +617,7 @@ def build_solver(
     ortho_weight: float = 0.1,
     ent_weight: float = 0.005,
 ) -> nn.Module:
-    """Factory: ``bipartite_sn_tm`` → ``BipartiteSnTmSolver``; else ``RiemannianSudokuSolver``."""
+    """Factory: bipartite / multibank façades, else ``RiemannianSudokuSolver``."""
     if mixer == 'bipartite_sn_tm':
         from riemannian_sudoku.solver import BipartiteSnTmSolver
 
@@ -627,6 +627,18 @@ def build_solver(
             supervise_all_steps=supervise_all_steps,
             pe_mode=pe_mode,
             routing_mode=routing_mode,
+            sigma_init=sigma_init,
+            ortho_weight=ortho_weight,
+            ent_weight=ent_weight,
+        )
+    if mixer == 'multibank_attractor':
+        from riemannian_sudoku.manifold_bank import MultiBankSolver
+
+        return MultiBankSolver(
+            num_steps=num_steps,
+            omega_weight=gauge_kinetic_weight,
+            supervise_all_steps=supervise_all_steps,
+            pe_mode=pe_mode,
             sigma_init=sigma_init,
             ortho_weight=ortho_weight,
             ent_weight=ent_weight,
