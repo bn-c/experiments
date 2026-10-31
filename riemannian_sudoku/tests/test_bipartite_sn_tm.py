@@ -139,13 +139,13 @@ def test_constant_house_batch_no_nan() -> None:
 def test_bipartite_param_count_target() -> None:
     model = BipartiteSnTmSolver()
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    assert n == 687_443, f'n_params={n} expected 687443'
+    assert n == 687_010, f'n_params={n} expected 687010'
     assert 600_000 <= n <= 700_000, f'n_params={n} outside 0.60–0.70M'
     assert model.logit_scale.item() == 4.0
 
 
 def test_kuramoto_fixed_point_zero_omega() -> None:
-    """y = atan2(c_sin, c_cos) ⇒ Kuramoto ω ≈ 0."""
+    """y = atan2(c_sin, c_cos) ⇒ Kuramoto ω_raw ≈ 0 ⇒ soft-capped ω ≈ 0."""
     from riemannian_sudoku.coupled_vf import CoupledVectorField
 
     torch.manual_seed(5)
@@ -166,12 +166,11 @@ def test_kuramoto_fixed_point_zero_omega() -> None:
     assert omega.abs().max() < 1e-6
 
 
-def test_pole_pull_vanishes_at_pole() -> None:
-    """At target ETF pole with softplus-safe logits, ‖v_tan‖≈0 and Exp is idle."""
+def test_closed_gate_idle_at_pole() -> None:
+    """gate≈0 ⇒ u[...,8:]=0; at ETF pole with radial u_etf ⇒ v_tan≈0 and x_next≈x."""
     from riemannian_sudoku.coupled_vf import CoupledVectorField
 
     torch.manual_seed(6)
-    # float64 + renorm: ETF is built in float32; softplus(+100)≈100 amplifies unit drift.
     vf = CoupledVectorField().double()
     poles = F.normalize(simplex_etf_poles().double(), dim=-1, eps=1e-12)
     c_idx = cell_house_idx()
@@ -179,20 +178,19 @@ def test_pole_pull_vanishes_at_pole() -> None:
     digit = 3
     x = poles[digit].view(1, 1, D).expand(1, 81, D).contiguous()
     y = torch.zeros(1, 27, M, dtype=torch.float64)
-    # Head logits: +100 target / -100 others / w_np=0 / scratch unused / gate logit -100.
-    raw = torch.full((1, 81, D + 2), -100.0, dtype=torch.float64)
-    raw[..., :N_DIGITS] = -100.0
-    raw[..., digit] = 100.0
-    raw[..., N_DIGITS] = 0.0  # w_np
-    raw[..., -1] = -100.0  # scratch gate logit
+    # Head: radial u_raw (=x at pole) + gate logit −100 → gate≈0, u[...,8:]=0.
+    raw = torch.zeros(1, 81, D + 1, dtype=torch.float64)
+    raw[..., :D] = x
+    raw[..., D] = -100.0
 
     class _FixedHead(torch.nn.Module):
         def forward(self, _h: torch.Tensor) -> torch.Tensor:
             return raw
 
     vf.vf_x_body = _FixedHead()
-    u, scratch_gate = vf.ambient_u(x, y, pe, c_idx, poles)
-    assert scratch_gate.max() < 1e-6
+    u, gate = vf.ambient_u(x, y, pe, c_idx, poles)
+    assert gate.max() < 1e-6
+    assert u[..., 8:].abs().max() < 1e-6
     v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
     assert v_tan.norm(dim=-1).max() < 1e-6
     is_clue = torch.zeros(1, 81, dtype=torch.bool)
