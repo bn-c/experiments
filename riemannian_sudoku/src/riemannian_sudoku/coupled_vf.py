@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -16,6 +18,9 @@ from riemannian_sudoku.manifold_embed import (
 
 # Soft-cap amplitude for Kuramoto ω (Option A: R-normalized; effective max≈0.83).
 _OMEGA_CAP = 1.25
+_SINKHORN_ITERS = 8
+_SIGMA_INIT = 0.5
+_HARD_ENTRY = 1.0 / 9.0
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
@@ -28,18 +33,110 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
-class BipartiteRouter:
+def _sinkhorn_rect(logits: Tensor, tau: Tensor, n_iters: int = _SINKHORN_ITERS) -> Tensor:
     """
-    Asymmetric hard incidence for S→T / T→S (no trainable params).
+    Rectangular Sinkhorn on ``(K, 9, 81)`` logits → log-domain ``Z``.
 
-    ``A_s2t`` ∈ R^{H×N} rows sum to 1; ``A_t2s`` ∈ R^{N×K_inc×H} one-hot.
-    Population variance via ``relu(A @ x² − μ²)`` (matches ``unbiased=False`` /9);
-    no Bessel ``1−∑A²``, no dense ``(B,H,N,D)`` broadcast.
+    Alternates col-norm (mass 1) and row-norm (mass 9). Returns ``Z`` after a
+    final col-norm so ``exp(Z)`` columns sum to 1.
+    """
+    z = logits / tau.clamp_min(1e-6)
+    log9 = math.log(9.0)
+    for _ in range(n_iters):
+        z = z - torch.logsumexp(z, dim=1, keepdim=True)  # cols → 1
+        z = z - torch.logsumexp(z, dim=2, keepdim=True) + log9  # rows → 9
+    z = z - torch.logsumexp(z, dim=1, keepdim=True)  # end on cols → 1
+    return z
+
+
+class BipartiteRouter(nn.Module):
+    """
+    Hard or soft-Sinkhorn bipartite incidence (Phase-1 / Phase-2).
+
+    Hard: static buffers ``A_s2t`` (27×81 row-stochastic), ``A_t2s`` (81×3×27).
+    Soft: trainable Φ ``(3,9,81)`` + optional pinned families → Sinkhorn →
+    ``A_s2t`` rows sum 1 (never rows-sum-9 into house features) and block
+    ``A_t2s``. Population variance: hard binary-S gather parity; soft weighted.
     """
 
-    def __init__(self, a_s2t: Tensor, a_t2s: Tensor) -> None:
+    def __init__(
+        self,
+        a_s2t: Tensor,
+        a_t2s: Tensor,
+        *,
+        routing_mode: str = 'hard',
+        sigma_init: float = _SIGMA_INIT,
+        sinkhorn_iters: int = _SINKHORN_ITERS,
+    ) -> None:
+        super().__init__()
+        if routing_mode not in ('hard', 'soft_sinkhorn'):
+            raise ValueError(f'routing_mode={routing_mode!r}')
+        self.routing_mode = routing_mode
+        self.sinkhorn_iters = int(sinkhorn_iters)
+        self.register_buffer('a_s2t_hard', a_s2t)
+        self.register_buffer('a_t2s_hard', a_t2s)
+        # Compat aliases for Phase-1 call sites / tests.
         self.a_s2t = a_s2t
         self.a_t2s = a_t2s
+        if routing_mode == 'soft_sinkhorn':
+            self.logits = nn.Parameter(torch.randn(3, 9, 81) * float(sigma_init))
+            self.register_buffer('pinned_logits', torch.zeros(3, 9, 81))
+            self.register_buffer('pinned_mask', torch.zeros(3, dtype=torch.bool))
+        else:
+            self.register_parameter('logits', None)
+            self.register_buffer('pinned_logits', torch.zeros(3, 9, 81))
+            self.register_buffer('pinned_mask', torch.zeros(3, dtype=torch.bool))
+
+    def effective_logits(self) -> Tensor:
+        """Blend pinned families over learnable Φ (soft only)."""
+        assert self.logits is not None
+        mask = self.pinned_mask.view(3, 1, 1)
+        return torch.where(mask, self.pinned_logits, self.logits)
+
+    def get_incidence(self, tau: Tensor | float = 0.5) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        Return ``(A_s2t, A_t2s, P_t2s)``.
+
+        Soft: ``P_t2s=exp(Z)`` cols sum 1; ``A_s2t=exp(Z)/9`` rows sum 1 stacked
+        over families → ``(27,81)``; ``A_t2s`` block-embeds ``P`` into ``(81,3,27)``.
+        Hard: Phase-1 buffers; ``P_t2s`` is the GT one-hot ``(3,9,81)``.
+        """
+        if self.routing_mode == 'hard':
+            p = torch.zeros(3, 9, 81, device=self.a_s2t_hard.device, dtype=self.a_s2t_hard.dtype)
+            # Recover one-hot P from hard A_t2s for diags.
+            for k in range(3):
+                # houses [9k:9k+9] ← local 0..8
+                block = self.a_t2s_hard[:, k, 9 * k : 9 * k + 9]  # (81, 9)
+                p[k] = block.T
+            return self.a_s2t_hard, self.a_t2s_hard, p
+
+        tau_t = tau if isinstance(tau, Tensor) else torch.tensor(float(tau), device=self.logits.device)
+        tau_t = tau_t.to(device=self.logits.device, dtype=self.logits.dtype)
+        z = _sinkhorn_rect(self.effective_logits(), tau_t, n_iters=self.sinkhorn_iters)
+        p = z.exp()  # (3,9,81) cols sum 1
+        # A_s2t: row-stochastic — NEVER feed rows-sum-9 into house_features.
+        a_s2t = (p / 9.0).reshape(27, 81)
+        a_t2s = torch.zeros(81, 3, 27, device=p.device, dtype=p.dtype)
+        for k in range(3):
+            a_t2s[:, k, 9 * k : 9 * k + 9] = p[k].T  # (81, 9)
+        return a_s2t, a_t2s, p
+
+    def pin_families(
+        self,
+        family_logits: Tensor,
+        families: Tensor | list[int] | None = None,
+    ) -> None:
+        """Pin selected families to ``family_logits`` (no N(0,σ) on pinned)."""
+        if families is None:
+            families = [0, 1, 2]
+        if not isinstance(families, Tensor):
+            families = torch.tensor(list(families), dtype=torch.long)
+        self.pinned_logits.copy_(family_logits.to(self.pinned_logits.dtype))
+        self.pinned_mask.zero_()
+        self.pinned_mask[families.long()] = True
+
+    def clear_pins(self) -> None:
+        self.pinned_mask.zero_()
 
     @staticmethod
     def house_features_from_a(
@@ -47,27 +144,32 @@ class BipartiteRouter:
         poles: Tensor,
         a_s2t: Tensor,
         d_sem: int = N_DIGITS,
+        *,
+        soft: bool = False,
     ) -> Tensor:
         """
-        Per-house ``(B, H, 2D+2·d_sem)`` via hard ``A_s2t`` matmuls only.
+        Per-house ``(B, H, 2D+2·d_sem)`` via ``A_s2t`` matmuls.
 
-        Population second moment matches tip ``var(..., unbiased=False)`` (/C0):
-        for row-stochastic hard-uniform ``A`` (entries ``1/C0``), reduce as
-        ``sum(S x)/C0`` with binary ``S=A/max(A)`` so fp32 matches gather
-        ``mean`` order (no Bessel ``1−∑A²``, no dense ``(B,H,N,D)`` broadcast).
+        Hard-uniform (default): binary ``S=A/max`` + ``/C0`` for gather fp32
+        parity. Soft row-stochastic (``soft=True``): weighted mean/var via ``A``
+        directly — ``A`` must rows-sum-1 (never rows-sum-9).
         """
-        # Hard-uniform: recover binary S and C0 so sum-then-divide matches gather.
-        row_max = a_s2t.max(dim=-1).values.clamp_min(1e-12)  # (H,) = 1/C0
-        s = a_s2t / row_max.unsqueeze(-1)  # (H, N) ∈ {0,1}
-        c0 = s.sum(dim=-1).clamp_min(1.0).view(1, -1, 1)  # (1, H, 1)
-        sx = torch.einsum('hn,bnd->bhd', s, x)
-        mu = sx / c0
-        var = F.relu(torch.einsum('hn,bnd->bhd', s, x.square()) / c0 - mu.square())
-        std = (var + 1e-6).sqrt()
         p_sem = poles[:, :d_sem]
         q = F.relu(x[..., :d_sem] @ p_sem.T)  # (B, N, d_sem)
-        q_mean = torch.einsum('hn,bnd->bhd', s, q) / c0
-        q_sq_mean = torch.einsum('hn,bnd->bhd', s, q.square()) / c0
+        if soft:
+            mu = torch.einsum('hn,bnd->bhd', a_s2t, x)
+            var = F.relu(torch.einsum('hn,bnd->bhd', a_s2t, x.square()) - mu.square())
+            q_mean = torch.einsum('hn,bnd->bhd', a_s2t, q)
+            q_sq_mean = torch.einsum('hn,bnd->bhd', a_s2t, q.square())
+        else:
+            row_max = a_s2t.max(dim=-1).values.clamp_min(1e-12)
+            s = a_s2t / row_max.unsqueeze(-1)
+            c0 = s.sum(dim=-1).clamp_min(1.0).view(1, -1, 1)
+            mu = torch.einsum('hn,bnd->bhd', s, x) / c0
+            var = F.relu(torch.einsum('hn,bnd->bhd', s, x.square()) / c0 - mu.square())
+            q_mean = torch.einsum('hn,bnd->bhd', s, q) / c0
+            q_sq_mean = torch.einsum('hn,bnd->bhd', s, q.square()) / c0
+        std = (var + 1e-6).sqrt()
         return torch.cat([mu, std, q_mean, q_sq_mean], dim=-1)
 
     @staticmethod
@@ -78,10 +180,10 @@ class BipartiteRouter:
         return gathered.reshape(b, n, k_inc * e)
 
     def house_features(self, x: Tensor, poles: Tensor, d_sem: int = N_DIGITS) -> Tensor:
-        return self.house_features_from_a(x, poles, self.a_s2t, d_sem=d_sem)
+        return self.house_features_from_a(x, poles, self.a_s2t_hard, d_sem=d_sem)
 
     def house_concat(self, y_emb: Tensor) -> Tensor:
-        return self.house_concat_from_a(y_emb, self.a_t2s)
+        return self.house_concat_from_a(y_emb, self.a_t2s_hard)
 
 
 class CoupledVectorField(nn.Module):
@@ -153,10 +255,12 @@ class CoupledVectorField(nn.Module):
         x: Tensor,
         poles: Tensor,
         a_s2t: Tensor,
+        *,
+        soft: bool = False,
     ) -> Tensor:
-        """Hard-A S→T features via ``BipartiteRouter`` (population /C0 variance)."""
+        """S→T features via ``BipartiteRouter`` (hard gather-parity or soft weighted)."""
         return BipartiteRouter.house_features_from_a(
-            x, poles, a_s2t, d_sem=self.d_sem
+            x, poles, a_s2t, d_sem=self.d_sem, soft=soft
         )
 
     def omega(
@@ -176,9 +280,11 @@ class CoupledVectorField(nn.Module):
         y: Tensor,
         poles: Tensor,
         a_s2t: Tensor,
+        *,
+        soft: bool = False,
     ) -> Tensor:
-        """Hard-A Kuramoto ω sharing ``vf_y`` weights."""
-        feat = self.house_features_hard(x, poles, a_s2t)
+        """Hard/soft-A Kuramoto ω sharing ``vf_y`` weights."""
+        feat = self.house_features_hard(x, poles, a_s2t, soft=soft)
         return self._omega_from_feat(feat, y)
 
     def _omega_from_feat(self, feat: Tensor, y: Tensor) -> Tensor:

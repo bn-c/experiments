@@ -181,6 +181,64 @@ def torus_t3_pe(pe_dim: int = PE_DIM) -> Tensor:
     return pe
 
 
+def torus_t2_grid_pe(pe_dim: int = PE_DIM) -> Tensor:
+    """
+    Row/col torus grid PE (no box index): ``[cos r, sin r, cos c, sin c, cos 2r, cos 2c]``.
+
+    Per-cell ``F.normalize`` so ``‖pe_i‖₂≡1`` (matches t3_full scratch-energy floor
+    under ``pe_alpha=0.25``). Shape ``(81, pe_dim)`` with ``pe_dim`` default 6.
+    """
+    rows = torch.arange(9).unsqueeze(1).expand(9, 9).reshape(81).float()
+    cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81).float()
+    r = 2.0 * math.pi * rows / 9.0
+    c = 2.0 * math.pi * cols / 9.0
+    pe = torch.zeros(81, pe_dim)
+    feats = (
+        torch.cos(r),
+        torch.sin(r),
+        torch.cos(c),
+        torch.sin(c),
+        torch.cos(2.0 * r),
+        torch.cos(2.0 * c),
+    )
+    for i, f in enumerate(feats):
+        if i >= pe_dim:
+            break
+        pe[:, i] = f
+    return F.normalize(pe, dim=-1, eps=1e-6)
+
+
+def build_pe(pe_mode: str = 't3_full', pe_dim: int = PE_DIM) -> Tensor:
+    """Dispatch ``t3_full`` (Phase-1) or ``t2_grid`` (Phase-2 gates)."""
+    if pe_mode == 't2_grid':
+        return torus_t2_grid_pe(pe_dim)
+    if pe_mode == 't3_full':
+        return torus_t3_pe(pe_dim)
+    raise ValueError(f'unknown pe_mode={pe_mode!r}; expected t3_full|t2_grid')
+
+
+def gt_family_logits(boost: float = 2.0) -> Tensor:
+    """GT Sudoku Φ ``(3,9,81)``: ``boost`` on each cell's true row/col/box house."""
+    cell_houses = cell_house_idx()  # (81, 3) absolute house ids
+    logits = torch.zeros(3, 9, 81)
+    for n in range(81):
+        for k in range(3):
+            h_local = int(cell_houses[n, k].item()) % 9
+            logits[k, h_local, n] = float(boost)
+    return logits
+
+
+def gt_peer_mask(n_cells: int = 81) -> Tensor:
+    """Bool ``(81,81)``: True iff cells share a row, col, or box (diag False)."""
+    houses = cell_house_idx()  # (81, 3)
+    mask = torch.zeros(n_cells, n_cells, dtype=torch.bool)
+    for k in range(3):
+        h = houses[:, k]
+        mask |= h.unsqueeze(0) == h.unsqueeze(1)
+    mask.fill_diagonal_(False)
+    return mask
+
+
 def house_cell_idx() -> Tensor:
     """Static ``HOUSE_CELL_IDX[27, 9]``: cells in each row/col/box house."""
     groups: list[list[int]] = []
