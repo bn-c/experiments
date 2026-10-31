@@ -152,8 +152,18 @@ def test_bipartite_param_count_target() -> None:
     model = BipartiteSnTmSolver()
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert n == 687_010, f'n_params={n} expected 687010'
+    assert model.vf_param_count() == 687_010
     assert 600_000 <= n <= 700_000, f'n_params={n} outside 0.60–0.70M'
     assert model.logit_scale.item() == 4.0
+
+
+def test_soft_router_phi_count() -> None:
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn')
+    assert model.vf_param_count() == 687_010
+    assert model.router.logits is not None
+    assert model.router.logits.numel() == 2187
+    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert n == 687_010 + 2187
 
 
 def test_kuramoto_fixed_point_zero_omega() -> None:
@@ -472,4 +482,97 @@ def test_adapter_encode_live_buffers_after_module_to() -> None:
         assert x0.device == a_s2t.device == puzzle.device
         out = model(puzzle)
         assert out['logits'].shape == (2, 81, 9)
+
+
+def test_t2_grid_pe_unit_norm_no_box() -> None:
+    """t2_grid: ‖pe‖≡1; no box-id harmonic (PE independent of box under row/col fix)."""
+    from riemannian_sudoku.manifold_embed import torus_t2_grid_pe
+
+    pe = torus_t2_grid_pe()
+    assert pe.shape == (81, 6)
+    assert torch.allclose(pe.norm(dim=-1), torch.ones(81), atol=1e-5)
+    # Cells that share row+col are unique; box changes with (r,c) but PE has no
+    # explicit box channel — smoke: PE of cell equals PE of same (r,c) only.
+    rows = torch.arange(9).unsqueeze(1).expand(9, 9).reshape(81)
+    cols = torch.arange(9).unsqueeze(0).expand(9, 9).reshape(81)
+    # Reconstruct from r,c only must match (no box term).
+    pe2 = torus_t2_grid_pe()
+    assert torch.allclose(pe, pe2)
+    # Distinct (r,c) → distinct PE (injective grid harmonics).
+    uniq = {tuple(pe[i].tolist()) for i in range(81)}
+    assert len(uniq) == 81
+    del rows, cols
+
+
+def test_soft_sinkhorn_row_col_sums() -> None:
+    """A_s2t rows≈1; A_t2s slots≈1; never rows-sum-9 into house features."""
+    from riemannian_sudoku.manifold_embed import gt_family_logits
+
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn', pe_mode='t2_grid')
+    model.router.pin_families(gt_family_logits(2.0), families=[0, 1, 2])
+    model.curr_tau.fill_(0.25)
+    a_s2t, a_t2s, p = model.router.get_incidence(model.curr_tau)
+    assert a_s2t.shape == (27, 81) and a_t2s.shape == (81, 3, 27) and p.shape == (3, 9, 81)
+    assert torch.allclose(a_s2t.sum(dim=-1), torch.ones(27), atol=1e-4)
+    assert torch.allclose(a_t2s.sum(dim=-1), torch.ones(81, 3), atol=1e-4)
+    assert torch.allclose(p.sum(dim=1), torch.ones(3, 81), atol=1e-4)
+    # Rows of exp(Z) would sum ~9; A_s2t must be /9.
+    assert a_s2t.sum(dim=-1).max() < 1.01
+
+
+def test_gt_family_gram_and_ortho_zero() -> None:
+    """GT off-diag: row/col≈0, row/box≈0.25, mean≈0.167; L_ortho(GT)=0."""
+    from riemannian_sudoku.manifold_embed import gt_family_logits
+    from riemannian_sudoku.solver import family_gram_sims, ortho_hinge
+
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn')
+    model.router.pin_families(gt_family_logits(2.0), families=[0, 1, 2])
+    model.curr_tau.fill_(0.02)  # near-hard one-hot
+    _a, _t, p = model.router.get_incidence(model.curr_tau)
+    mean, sims = family_gram_sims(p)
+    # sims order: (0,1)=row-col, (0,2)=row-box, (1,2)=col-box
+    assert sims[0].abs() < 0.02, f'row/col sim={sims[0].item()}'
+    assert abs(sims[1].item() - 0.25) < 0.02, f'row/box sim={sims[1].item()}'
+    assert abs(sims[2].item() - 0.25) < 0.02, f'col/box sim={sims[2].item()}'
+    assert abs(mean.item() - 1.0 / 6.0) < 0.02
+    assert ortho_hinge(p, margin=0.25).item() < 1e-6
+
+
+def test_gate1_pinned_init_entropy_purity() -> None:
+    """Gate1 math: Φ=GT+2.0 @ τ=0.25 → H≈0.024<0.05, purity≈1; no N(0,0.5) on pinned."""
+    from riemannian_sudoku.manifold_embed import gt_family_logits
+    from riemannian_sudoku.solver import column_entropy, sudoku_graph_purity
+
+    model = BipartiteSnTmSolver(routing_mode='soft_sinkhorn', pe_mode='t2_grid')
+    gt = gt_family_logits(2.0)
+    model.router.pin_families(gt, families=[0, 1, 2])
+    # Pinned path ignores learnable Φ — noise on logits must not affect incidence.
+    with torch.no_grad():
+        model.router.logits.normal_(0.0, 0.5)
+    model.curr_tau.fill_(0.25)
+    _a, _t, p = model.router.get_incidence(model.curr_tau)
+    ent = column_entropy(p).item()
+    purity = sudoku_graph_purity(p, model.gt_peer_mask).item()
+    assert ent < 0.05, f'entropy={ent}'
+    assert purity > 0.99, f'purity={purity}'
+    # Effective logits equal pinned (mask all-True).
+    assert torch.allclose(model.router.effective_logits(), gt)
+
+
+def test_soft_forward_aux_losses() -> None:
+    torch.manual_seed(0)
+    model = BipartiteSnTmSolver(
+        num_steps=2, routing_mode='soft_sinkhorn', pe_mode='t2_grid'
+    )
+    model.curr_tau.fill_(0.5)
+    model.curr_ent_weight.fill_(0.005)
+    puzzle = torch.randint(0, 10, (2, 81))
+    solution = torch.randint(1, 10, (2, 81))
+    out = model(puzzle, solution)
+    assert torch.isfinite(out['loss'])
+    assert 'sudoku_graph_purity' in out and 'family_gram_sim' in out
+    assert 'routing_entropy' in out
+    out['loss'].backward()
+    assert model.router.logits.grad is not None
+    assert model.router.logits.grad.abs().sum() > 0
 

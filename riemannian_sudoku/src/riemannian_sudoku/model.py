@@ -611,6 +611,11 @@ def build_solver(
     mlp_activation: str = 'gelu',
     mlp_layers: int = 1,
     mlp_width: str = 'default',
+    pe_mode: str = 't3_full',
+    routing_mode: str = 'hard',
+    sigma_init: float = 0.5,
+    ortho_weight: float = 0.1,
+    ent_weight: float = 0.005,
 ) -> nn.Module:
     """Factory: ``bipartite_sn_tm`` → ``BipartiteSnTmSolver``; else ``RiemannianSudokuSolver``."""
     if mixer == 'bipartite_sn_tm':
@@ -620,6 +625,11 @@ def build_solver(
             num_steps=num_steps,
             omega_weight=gauge_kinetic_weight,  # λ_ω via --gauge-kinetic-weight
             supervise_all_steps=supervise_all_steps,
+            pe_mode=pe_mode,
+            routing_mode=routing_mode,
+            sigma_init=sigma_init,
+            ortho_weight=ortho_weight,
+            ent_weight=ent_weight,
         )
     return RiemannianSudokuSolver(
         d_model=d_model,

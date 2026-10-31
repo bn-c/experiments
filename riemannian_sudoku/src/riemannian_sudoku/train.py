@@ -16,6 +16,7 @@ from tqdm import tqdm
 from riemannian_sudoku.data import SudokuDataset, SudokuTorchDataset, split_train_val
 from riemannian_sudoku.geometry import sudoku_group_indices
 from riemannian_sudoku.model import RiemannianSudokuSolver, build_solver
+from riemannian_sudoku.solver import LAMBDA_ENT_DEFAULT, routing_tau
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -255,6 +256,8 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.mlp_layers = _resolve_mlp_layers(getattr(args, 'mlp_layers', None), ckpt_args)
     args.mlp_width = _resolve_mlp_width(getattr(args, 'mlp_width', None), ckpt_args)
 
+    pe_mode = str(getattr(args, 'pe_mode', 't3_full') or 't3_full')
+    routing_mode = str(getattr(args, 'routing_mode', 'hard') or 'hard')
     model = build_solver(
         args.mixer,
         d_model=args.d_model,
@@ -269,11 +272,43 @@ def train_cmd(args: argparse.Namespace) -> None:
         mlp_activation=args.mlp_activation,
         mlp_layers=args.mlp_layers,
         mlp_width=args.mlp_width,
+        pe_mode=pe_mode,
+        routing_mode=routing_mode,
+        sigma_init=float(getattr(args, 'sigma_init', 0.5)),
+        ortho_weight=float(getattr(args, 'ortho_weight', 0.1)),
+        ent_weight=float(getattr(args, 'ent_weight', 0.005)),
     ).to(device)
     args.mlp_layers = int(getattr(model, 'mlp_layers', 1))
     args.mlp_width = str(getattr(model, 'mlp_width', 'default'))
     # Model may force use_gauge=False for non-cross mixers; keep summary in sync.
     args.use_gauge = bool(getattr(model, 'use_gauge', False))
+    args.pe_mode = pe_mode
+    args.routing_mode = routing_mode
+
+    # Phase-2 gate inits: pin GT families / hold τ (no N(0,σ) on pinned).
+    if routing_mode == 'soft_sinkhorn' and hasattr(model, 'router'):
+        from riemannian_sudoku.manifold_embed import gt_family_logits
+
+        gate_init = str(getattr(args, 'routing_init', 'random') or 'random')
+        gt = gt_family_logits(boost=float(getattr(args, 'gt_boost', 2.0)))
+        if gate_init == 'gt_pinned':
+            model.router.pin_families(gt, families=[0, 1, 2])
+            logger.info('Routing init: all families pinned GT +%.2f (no noise)', float(getattr(args, 'gt_boost', 2.0)))
+        elif gate_init == 'partial_blind':
+            model.router.pin_families(gt, families=[0, 1])
+            with torch.no_grad():
+                model.router.logits[2].normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+            logger.info('Routing init: pin families 0–1 GT; family 2 ~ N(0, σ²)')
+        elif gate_init == 'full_blind':
+            model.router.clear_pins()
+            with torch.no_grad():
+                model.router.logits.normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+            logger.info('Routing init: full-blind Φ ~ N(0, σ²)')
+        tau_hold = getattr(args, 'tau_hold', None)
+        if tau_hold is not None:
+            model.curr_tau.fill_(float(tau_hold))
+            logger.info('τ held at %.4f', float(tau_hold))
+
     if args.compile:
         # Desk ROCm 7.1: mode=default (reduce-overhead/CUDAGraphs hit HSA packet errors).
         # Same hot-path wrap idea as sfprm_miniarc/train.py --compile.
@@ -281,8 +316,26 @@ def train_cmd(args: argparse.Namespace) -> None:
         logger.info('torch.compile: model.forward (mode=default)')
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('Trainable parameters: %s', f'{n_params:,}')
+    if hasattr(model, 'vf_param_count'):
+        logger.info('VF parameters (excl. router Φ): %s', f'{model.vf_param_count():,}')
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # Two-timescale AdamW: VF group + soft router Φ (wd=0, LR warm-up 0→5×lr).
+    router_params = [
+        p for n, p in model.named_parameters() if p.requires_grad and n.startswith('router.logits')
+    ]
+    vf_params = [
+        p for n, p in model.named_parameters() if p.requires_grad and not n.startswith('router.logits')
+    ]
+    if router_params:
+        opt = torch.optim.AdamW(
+            [
+                {'params': vf_params, 'lr': args.lr, 'weight_decay': 1e-4},
+                {'params': router_params, 'lr': 0.0, 'weight_decay': 0.0},
+            ]
+        )
+        logger.info('AdamW two-timescale: VF lr=%.6g; router warm-up 0→5× over 1k', args.lr)
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +447,24 @@ def train_cmd(args: argparse.Namespace) -> None:
         puzzle = batch['puzzle'].to(device, non_blocking=nb)
         solution = batch['solution'].to(device, non_blocking=nb)
         mask = batch['mask'].to(device, non_blocking=nb)
+
+        # Compile-safe schedule: 0-D buffers via .fill_() (no Python if inside forward).
+        soft = str(getattr(args, 'routing_mode', 'hard')) == 'soft_sinkhorn'
+        if soft and hasattr(model, 'curr_tau'):
+            tau_hold = getattr(args, 'tau_hold', None)
+            if tau_hold is not None:
+                tau = float(tau_hold)
+            else:
+                tau = routing_tau(step, args.steps)
+            model.curr_tau.fill_(tau)
+            ent_on = step > int(0.2 * args.steps)
+            ent_w = float(getattr(args, 'ent_weight', LAMBDA_ENT_DEFAULT)) if ent_on else 0.0
+            model.curr_ent_weight.fill_(ent_w)
+        if soft and len(opt.param_groups) > 1:
+            # Router LR linear 0→5×lr_vf over first 1k steps (wd=0 group).
+            warm = min(1.0, float(step) / 1000.0)
+            opt.param_groups[1]['lr'] = 5.0 * float(args.lr) * warm
+
         out = model(puzzle, solution, mask)
         opt.zero_grad(set_to_none=True)
         out['loss'].backward()
@@ -403,6 +474,10 @@ def train_cmd(args: argparse.Namespace) -> None:
         # Stop stepping after T_max so LR holds at eta_min (no cosine rebound).
         if sched is not None and sched.last_epoch < sched.T_max:
             sched.step()
+            # CosineAnnealingLR touches all groups — restore router warm-up LR.
+            if soft and len(opt.param_groups) > 1:
+                warm = min(1.0, float(step + 1) / 1000.0)
+                opt.param_groups[1]['lr'] = 5.0 * float(args.lr) * warm
         step += 1
         if t_steady0 is None and step >= warmup_steps:
             if use_cuda:
@@ -426,6 +501,8 @@ def train_cmd(args: argparse.Namespace) -> None:
             'train/lr': float(opt.param_groups[0]['lr']),
             'train/step': step,
         }
+        if len(opt.param_groups) > 1:
+            metrics['train/lr_router'] = float(opt.param_groups[1]['lr'])
         # Bipartite diags: ||ω_1||², ||ω_K||², scratch/claim energy, NP residual, logit_scale.
         for key, wandb_key in (
             ('omega_sq_1', 'train/omega_sq_1'),
@@ -437,6 +514,13 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('blank_np', 'train/blank_np'),
             ('claim_energy', 'train/claim_energy'),
             ('logit_scale', 'train/logit_scale'),
+            ('routing_tau', 'train/routing_tau'),
+            ('routing_entropy', 'train/routing_entropy'),
+            ('house_load_std', 'train/house_load_std'),
+            ('family_gram_sim', 'train/family_gram_sim'),
+            ('sudoku_graph_purity', 'train/sudoku_graph_purity'),
+            ('ortho_loss', 'train/ortho_loss'),
+            ('ent_loss', 'train/ent_loss'),
         ):
             if key in out:
                 metrics[wandb_key] = float(out[key])
@@ -776,6 +860,42 @@ def main() -> None:
         type=int,
         default=100,
         help='Steps excluded from IT_S_STEADY (compile capture / dataloader fill)',
+    )
+    t.add_argument(
+        '--pe-mode',
+        type=str,
+        default='t3_full',
+        choices=['t3_full', 't2_grid'],
+        help='bipartite PE: t3_full (Phase-1) or t2_grid (Phase-2 gates)',
+    )
+    t.add_argument(
+        '--routing-mode',
+        type=str,
+        default='hard',
+        choices=['hard', 'soft_sinkhorn'],
+        help='bipartite incidence: hard Phase-1 or soft Sinkhorn Φ',
+    )
+    t.add_argument(
+        '--routing-init',
+        type=str,
+        default='random',
+        choices=['random', 'gt_pinned', 'partial_blind', 'full_blind'],
+        help='soft router init (Gate1 gt_pinned / Gate2 partial_blind / Gate3 full_blind)',
+    )
+    t.add_argument('--sigma-init', type=float, default=0.5, help='soft Φ N(0,σ²) scale')
+    t.add_argument('--gt-boost', type=float, default=2.0, help='pinned GT logit boost')
+    t.add_argument(
+        '--tau-hold',
+        type=float,
+        default=None,
+        help='hold routing τ fixed (Gate1: 0.25); default anneals',
+    )
+    t.add_argument('--ortho-weight', type=float, default=0.1, help='λ_ortho on family Gram hinge')
+    t.add_argument(
+        '--ent-weight',
+        type=float,
+        default=0.005,
+        help='λ_ent after 0.2 T_max (0 before)',
     )
 
     e = sub.add_parser('eval', help='Evaluate checkpoint')
