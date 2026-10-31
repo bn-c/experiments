@@ -99,6 +99,10 @@ class SudokuProblemAdapter:
 
     Identical to ``init_bipartite_state`` + static hard incidence from indices.
     Hard clue clamp only; no learned encoder / soft α.
+
+    Stored ``_poles`` / ``_pe`` / ``_a_*`` are CPU fallbacks for unit tests only.
+    Production ``encode`` must pass the solver's **live** registered buffers
+    (``poles=self.poles``, …) — plain refs go stale after ``module.to(cuda)``.
     """
 
     def __init__(
@@ -110,30 +114,56 @@ class SudokuProblemAdapter:
         house_cells: Tensor | None = None,
         cell_houses: Tensor | None = None,
     ) -> None:
-        self.poles = poles
-        self.pe = pe
         self.pe_alpha = pe_alpha
+        # Fallbacks for standalone tests; do not treat as device-tracking buffers.
+        self._poles = poles
+        self._pe = pe
         a_s2t, a_t2s = hard_incidence_from_indices(house_cells, cell_houses)
-        self.a_s2t = a_s2t
-        self.a_t2s = a_t2s
+        self._a_s2t = a_s2t
+        self._a_t2s = a_t2s
 
-    def encode(self, puzzle: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Return ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)`` on ``poles`` device."""
-        # Model buffers are the device source of truth (compile + .cuda() path).
-        device = self.poles.device
-        dtype = self.poles.dtype
+    # Compat aliases (tests / older call sites).
+    @property
+    def poles(self) -> Tensor:
+        return self._poles
+
+    @property
+    def pe(self) -> Tensor:
+        return self._pe
+
+    @property
+    def a_s2t(self) -> Tensor:
+        return self._a_s2t
+
+    @property
+    def a_t2s(self) -> Tensor:
+        return self._a_t2s
+
+    def encode(
+        self,
+        puzzle: Tensor,
+        *,
+        poles: Tensor | None = None,
+        pe: Tensor | None = None,
+        a_s2t: Tensor | None = None,
+        a_t2s: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Return pack on ``puzzle.device`` using live buffers when provided."""
+        poles = self._poles if poles is None else poles
+        pe = self._pe if pe is None else pe
+        a_s2t = self._a_s2t if a_s2t is None else a_s2t
+        a_t2s = self._a_t2s if a_t2s is None else a_t2s
+        # Batch device wins — never trust a possibly-stale poles.device snapshot.
+        device = puzzle.device
+        dtype = poles.dtype
+        poles = poles.to(device=device, dtype=dtype)
+        pe = pe.to(device=device, dtype=dtype)
+        a_s2t = a_s2t.to(device=device, dtype=dtype)
+        a_t2s = a_t2s.to(device=device, dtype=dtype)
         x0, y0, is_clue = init_bipartite_state(
-            puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
+            puzzle, poles, pe, pe_alpha=self.pe_alpha
         )
-        return (
-            x0,
-            is_clue,
-            self.pe.to(device=device, dtype=dtype),
-            self.a_s2t.to(device=device, dtype=dtype),
-            self.a_t2s.to(device=device, dtype=dtype),
-            self.poles,
-            y0,
-        )
+        return x0, is_clue, pe, a_s2t, a_t2s, poles, y0
 
 
 def torus_t3_pe(pe_dim: int = PE_DIM) -> Tensor:
@@ -197,20 +227,21 @@ def init_bipartite_state(
     ``nn.Parameter``). After renorm, clues keep ``‖x[:9]‖≈0.970`` with PE mass
     in ``9:15``.
 
-    Device: ``poles`` (model buffer) is canonical — ``puzzle`` / ``pe`` / ``is_clue``
-    are moved onto ``poles.device`` so ``torch.compile`` + CUDA cannot leave
-    ``is_clue`` on CPU while ``pole_x`` lives on ``cuda:0``.
+    Device: ``puzzle.device`` is canonical (batch / train loader). ``poles`` and
+    ``pe`` are moved onto it so ``is_clue`` and ``pole_x`` cannot diverge under
+    ``torch.compile`` + CUDA — callers must pass **live** module buffers, not
+    stale CPU snapshots held outside ``nn.Module._buffers``.
     """
-    device = poles.device
+    device = puzzle.device
     dtype = poles.dtype
-    puzzle = puzzle.to(device=device)
+    poles = poles.to(device=device)
     pe = pe.to(device=device, dtype=dtype)
     b = puzzle.shape[0]
     d = poles.shape[-1]
     x = north_pole(d).to(device=device, dtype=dtype).expand(b, 81, d).contiguous().clone()
     is_clue = puzzle > 0
     digit_idx = (puzzle.clamp(min=1) - 1).clamp(0, N_DIGITS - 1)
-    pole_x = poles[digit_idx]  # (B, 81, D) — same device as poles
+    pole_x = poles[digit_idx]  # (B, 81, D) — same device as puzzle
     x = torch.where(is_clue.unsqueeze(-1), pole_x, x)
 
     # PE into scratch for all cells, then renorm (clue :9 stays ≈ ETF after renorm).

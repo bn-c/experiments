@@ -405,54 +405,71 @@ def test_sudoku_adapter_pack() -> None:
     assert poles_o.shape == (9, D)
 
 
-def test_init_and_adapter_device_match_poles() -> None:
-    """is_clue / x / y land on poles.device even when puzzle starts on CPU."""
+def test_init_and_adapter_device_match_puzzle() -> None:
+    """is_clue / x / y / A land on puzzle.device (batch canonical)."""
     from riemannian_sudoku.manifold_embed import SudokuProblemAdapter
 
     poles = simplex_etf_poles()
     pe = torus_t3_pe()
     puzzle_cpu = torch.randint(0, 10, (2, 81), device='cpu')
     x, y, is_clue = init_bipartite_state(puzzle_cpu, poles, pe)
-    assert x.device == poles.device
-    assert y.device == poles.device
-    assert is_clue.device == poles.device
-    # where(clue, pole_x, x) must not raise — all same device
+    assert x.device == puzzle_cpu.device
+    assert y.device == puzzle_cpu.device
+    assert is_clue.device == puzzle_cpu.device
     assert (x[is_clue].norm(dim=-1) - 1).abs().max() < 1e-4
 
     adapter = SudokuProblemAdapter(poles, pe)
     x0, is_clue2, pe_o, a_s2t, a_t2s, poles_o, y0 = adapter.encode(puzzle_cpu)
     for t in (x0, is_clue2, pe_o, a_s2t, a_t2s, poles_o, y0):
-        assert t.device == poles.device, f'{t.shape} on {t.device} != poles {poles.device}'
+        assert t.device == puzzle_cpu.device, f'{t.shape} on {t.device}'
 
 
-def test_init_device_aligns_when_poles_not_on_puzzle_device() -> None:
+def test_adapter_encode_live_buffers_after_module_to() -> None:
     """
-    Regression for compile desk crash: poles on cuda, puzzle on cpu → all on poles.
-
-    Falls back to a CPU same-device assert when CUDA is unavailable (still checks
-    that poles remain the canonical device).
+    Regression: adapter CPU snapshots go stale after model.to(cuda); encode must
+    take live registered buffers so x0 and A_s2t share puzzle.device.
     """
-    poles = simplex_etf_poles()
-    pe = torus_t3_pe()
-    puzzle = torch.randint(0, 10, (2, 81), device='cpu')
+    from riemannian_sudoku.manifold_embed import SudokuProblemAdapter
+
+    model = BipartiteSnTmSolver(num_steps=1)
+    # Freeze stale CPU copies on the adapter (simulates pre-.to refs).
+    model.adapter._poles = model.poles.detach().cpu().clone()
+    model.adapter._pe = model.pe.detach().cpu().clone()
+    model.adapter._a_s2t = model.a_s2t.detach().cpu().clone()
+    model.adapter._a_t2s = model.a_t2s.detach().cpu().clone()
+
     if torch.cuda.is_available():
-        poles_g = poles.cuda()
-        pe_g = pe.cuda()
-        x, y, is_clue = init_bipartite_state(puzzle, poles_g, pe_g)
-        assert x.device.type == 'cuda'
-        assert is_clue.device.type == 'cuda'
-        assert y.device.type == 'cuda'
-        # Smoke: one geodesic step with clue mask on GPU
-        from riemannian_sudoku.geodesic import geodesic_step
-
-        u = torch.randn_like(x)
-        x1 = geodesic_step(x, u, x, is_clue)
-        assert x1.device.type == 'cuda'
-        # Façade integrate on CUDA
-        model = BipartiteSnTmSolver(num_steps=1).cuda()
-        out = model(puzzle.cuda())
+        model = model.cuda()
+        # Buffers moved; adapter._poles still CPU.
+        assert model.adapter._poles.device.type == 'cpu'
+        assert model.poles.device.type == 'cuda'
+        puzzle = torch.randint(0, 10, (2, 81), device='cuda')
+        x0, is_clue, pe, a_s2t, a_t2s, poles, y0 = model.adapter.encode(
+            puzzle,
+            poles=model.poles,
+            pe=model.pe,
+            a_s2t=model.a_s2t,
+            a_t2s=model.a_t2s,
+        )
+        for t in (x0, is_clue, pe, a_s2t, a_t2s, poles, y0):
+            assert t.device.type == 'cuda'
+        # house_features must not raise device mismatch
+        feat = model.vf.house_features_hard(x0, poles, a_s2t)
+        assert feat.device.type == 'cuda'
+        out = model(puzzle)
         assert out['x'].device.type == 'cuda'
+        assert torch.isfinite(out['logits']).all()
     else:
-        x, y, is_clue = init_bipartite_state(puzzle, poles, pe)
-        assert is_clue.device == x.device == poles.device
+        # CPU: live kwargs still align pack to puzzle.device
+        puzzle = torch.randint(0, 10, (2, 81))
+        x0, is_clue, pe, a_s2t, a_t2s, poles, y0 = model.adapter.encode(
+            puzzle,
+            poles=model.poles,
+            pe=model.pe,
+            a_s2t=model.a_s2t,
+            a_t2s=model.a_t2s,
+        )
+        assert x0.device == a_s2t.device == puzzle.device
+        out = model(puzzle)
+        assert out['logits'].shape == (2, 81, 9)
 

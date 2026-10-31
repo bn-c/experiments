@@ -185,18 +185,17 @@ class BipartiteSnTmSolver(nn.Module):
         Returns final ``x``, per-step ω list, per-step post-update ``x`` states.
         Stashes blank-only ``v_tan_sq`` and ``scratch_gate`` diags on ``self``.
         """
-        x0, is_clue, pe, a_s2t, a_t2s, poles, y0 = self.adapter.encode(puzzle)
-        # Prefer registered buffers (same values; device-safe under DDP/compile).
-        x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate(
-            x0,
-            y0,
-            is_clue,
-            self.pe,
-            self.a_s2t,
-            self.a_t2s,
-            self.poles,
+        # Pass live registered buffers — adapter's stored refs go stale after .to(cuda).
+        x0, is_clue, pe, a_s2t, a_t2s, poles, y0 = self.adapter.encode(
+            puzzle,
+            poles=self.poles,
+            pe=self.pe,
+            a_s2t=self.a_s2t,
+            a_t2s=self.a_t2s,
         )
-        del pe, a_s2t, a_t2s, poles  # adapter copies; buffers used above
+        x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate(
+            x0, y0, is_clue, pe, a_s2t, a_t2s, poles
+        )
         self._last_omegas = omegas
         self._last_is_clue = is_clue
         self._last_v_tan_sqs = v_tan_sqs
@@ -205,17 +204,22 @@ class BipartiteSnTmSolver(nn.Module):
 
     def integrate_gather(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """Gather reference integrate (parity tests); shares ``vf`` weights."""
-        x0, is_clue, pe, _a_s2t, _a_t2s, poles, y0 = self.adapter.encode(puzzle)
+        x0, is_clue, pe, _a_s2t, _a_t2s, poles, y0 = self.adapter.encode(
+            puzzle,
+            poles=self.poles,
+            pe=self.pe,
+            a_s2t=self.a_s2t,
+            a_t2s=self.a_t2s,
+        )
         x, omegas, states, v_tan_sqs, scratch_gates = self.core.integrate_gather(
             x0,
             y0,
             is_clue,
-            self.pe,
+            pe,
             self.house_cell_idx,
             self.cell_house_idx,
-            self.poles,
+            poles,
         )
-        del pe, poles
         self._last_omegas = omegas
         self._last_is_clue = is_clue
         self._last_v_tan_sqs = v_tan_sqs
