@@ -59,6 +59,10 @@ W&B [`wasxqgo7`](https://forge.coreweave.com/wandb/nanodegree-forge/riemannian-s
 best blank **0.6163** @ step **49500** (K=32); undamped K_eval peak at train K
 (exact **0.176**); K=64 blank **0.463** / exact **0.007**; K≥128 exact=0.
 Beats `ca48ruu4` mid-K; **not a tip promote** (tip `f7fv0ymk` keeps high-K exact).
+Post-hoc eval damp (β=1, γ=1, damp \(u_c\), **start=32**): exact@512 **0.172**
+(vs undamped 0; vs ca48 damp 0.137); peak exact **0.204** @K=128. Twin start=16:
+exact@512 **0.197**, flatter blank. See store
+`riemannian-sudoku-bipartite-tip-landing-kin-damp-keval.md`.
 
 ---
 
