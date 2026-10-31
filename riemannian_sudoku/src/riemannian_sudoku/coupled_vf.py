@@ -6,7 +6,15 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from riemannian_sudoku.manifold_embed import D, M, N_DIGITS, PE_DIM, clifford_embed
+from riemannian_sudoku.manifold_embed import (
+    BLANK_COORD,
+    D,
+    M,
+    N_DIGITS,
+    PE_DIM,
+    SCRATCH_START,
+    clifford_embed,
+)
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
@@ -21,11 +29,11 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_mid: int) -> nn.Sequential:
 
 class CoupledVectorField(nn.Module):
     """
-    Leapfrog pair: house ω from cell aggregates + Clifford ``y_emb``, then cell
-    ambient u from FiLM(cell+PE, house embeds) → mid×2 → out.
+    Leapfrog pair: Kuramoto house ω from cell aggregates + Clifford ``y_emb``,
+    then cell ambient u via FiLM → pole-pull + gated scratch.
 
-    A2 P2 widths ~681k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
-    ``M=16``, ``in_y=178``.
+    A2 attractor widths ~687k: ``H_Y=320`` (1 mid), ``H_X=432`` (FiLM + 2 mid);
+    ``M=16``, ``in_y=178``, ``vf_y`` out ``2M``, ``vf_x_body`` out ``D+2``.
     """
 
     def __init__(
@@ -43,18 +51,14 @@ class CoupledVectorField(nn.Module):
         emb_m = 2 * m  # Clifford cat(cos,sin)
         # mean+std (2d) + mean q + mean q² (2·9) + y_emb (2m)
         in_y = 2 * d + 2 * N_DIGITS + emb_m
-        self.vf_y = _mlp(in_y, h_y, m, n_mid=1)
+        # Kuramoto targets (c_cos, c_sin); no α-bias hack.
+        self.vf_y = _mlp(in_y, h_y, 2 * m, n_mid=1)
         # FiLM first block: cell(+PE) + house shift/gate → H_X; then mid×2 + out.
         self.x_in_cell = nn.Linear(d + pe_dim, h_x)
         self.x_in_house_shift = nn.Linear(3 * emb_m, h_x)
         self.x_in_house_gate = nn.Linear(3 * emb_m, h_x)
-        self.vf_x_body = nn.Sequential(
-            nn.Linear(h_x, h_x),
-            nn.SiLU(),
-            nn.Linear(h_x, h_x),
-            nn.SiLU(),
-            nn.Linear(h_x, d),
-        )
+        # Out D+2: softplus poles(9) + w_np(1) + scratch(55) + gate logit(1).
+        self.vf_x_body = _mlp(h_x, h_x, d + 2, n_mid=1)
 
     def house_features(
         self,
@@ -88,10 +92,17 @@ class CoupledVectorField(nn.Module):
         poles: Tensor,
         house_cell_idx: Tensor,
     ) -> Tensor:
-        """House angular velocity ``(B, 27, M)`` from ``[house_feats(x), y_emb]``."""
+        """
+        Kuramoto house angular velocity ``(B, 27, M)``.
+
+        MLP emits ``(c_cos, c_sin)``; ``ω = c_sin·cos(y) - c_cos·sin(y)``.
+        Fixed point when ``y = atan2(c_sin, c_cos)`` ⇒ ``ω ≈ 0``.
+        """
         feat = self.house_features(x, poles, house_cell_idx)
         y_emb = clifford_embed(y)
-        return self.vf_y(torch.cat([feat, y_emb], dim=-1))
+        raw = self.vf_y(torch.cat([feat, y_emb], dim=-1))
+        c_cos, c_sin = raw.split(self.m, dim=-1)
+        return c_sin * torch.cos(y) - c_cos * torch.sin(y)
 
     def ambient_u(
         self,
@@ -99,11 +110,14 @@ class CoupledVectorField(nn.Module):
         y: Tensor,
         pe: Tensor,
         cell_house_idx: Tensor,
-    ) -> Tensor:
+        poles: Tensor,
+    ) -> tuple[Tensor, Tensor]:
         """
-        Cell ambient velocity ``(B, 81, D)`` via FiLM(cell+PE, house embeds).
+        Cell ambient velocity ``(B, 81, D)`` via FiLM → pole-pull + gated scratch.
 
-        Clifford house embeds gathered with static ``CELL_HOUSE_IDX[81, 3]``.
+        Head split: softplus ETF weights (9) + raw ``w_np`` (1) + scratch (55) +
+        sigmoid gate (1). Returns ``(u, scratch_gate)`` with gate shape ``(B, 81)``.
+        Compile-safe (no in-place writes on graph tensors).
         """
         y_emb = clifford_embed(y)  # (B, 27, 2M)
         emb_m = 2 * self.m
@@ -111,5 +125,25 @@ class CoupledVectorField(nn.Module):
         pe_b = pe.unsqueeze(0).expand(x.shape[0], -1, -1)
         cell_in = torch.cat([x, pe_b], dim=-1)  # (B, 81, D+PE_DIM)
         base = F.silu(self.x_in_cell(cell_in) + self.x_in_house_shift(house_in))
-        gate = 1.0 + torch.tanh(self.x_in_house_gate(house_in))
-        return self.vf_x_body(base * gate)
+        film_gate = 1.0 + torch.tanh(self.x_in_house_gate(house_in))
+        raw = self.vf_x_body(base * film_gate)  # (B, 81, D+2)
+
+        w_poles = F.softplus(raw[..., :N_DIGITS])
+        w_np = raw[..., N_DIGITS : N_DIGITS + 1]
+        scratch = raw[..., N_DIGITS + 1 : N_DIGITS + 1 + (self.d - SCRATCH_START)]
+        scratch_gate = torch.sigmoid(raw[..., -1])  # (B, 81)
+
+        # ETF pull on digit subspace + North-Pole term (coord 8).
+        u_digit = torch.matmul(w_poles, poles)  # (B, 81, D)
+        e8 = F.pad(x.new_ones(1), (BLANK_COORD, self.d - BLANK_COORD - 1))
+        u_np = w_np * e8
+        # Gated scratch on coords 9..63 (zero-pad digit block).
+        scratch_u = torch.cat(
+            [
+                scratch.new_zeros(*scratch.shape[:-1], SCRATCH_START),
+                scratch_gate.unsqueeze(-1) * scratch,
+            ],
+            dim=-1,
+        )
+        u = u_digit + u_np + scratch_u
+        return u, scratch_gate

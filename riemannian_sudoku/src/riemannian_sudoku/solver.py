@@ -84,9 +84,10 @@ class BipartiteSnTmSolver(nn.Module):
 
     def integrate(self, puzzle: Tensor) -> tuple[Tensor, list[Tensor], list[Tensor]]:
         """
-        Leapfrog ``K`` steps: ω on houses, then geodesic on cells.
+        Leapfrog ``K`` steps: Kuramoto ω on houses, then geodesic on cells.
 
         Returns final ``x``, per-step ω list, per-step post-update ``x`` states.
+        Stashes blank-only ``v_tan_sq`` and ``scratch_gate`` diags on ``self``.
         """
         x, y, is_clue = init_bipartite_state(
             puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
@@ -94,15 +95,28 @@ class BipartiteSnTmSolver(nn.Module):
         x0 = x
         omegas: list[Tensor] = []
         states: list[Tensor] = []
+        v_tan_sqs: list[Tensor] = []
+        scratch_gates: list[Tensor] = []
+        blank_f = (~is_clue).to(dtype=x.dtype)
+        blank_denom = blank_f.sum().clamp_min(1.0)
         for _ in range(self.num_steps):
             omega = self.vf.omega(x, y, self.poles, self.house_cell_idx)
             omegas.append(omega)
             y = torus_step(y, omega)
-            u = self.vf.ambient_u(x, y, self.pe, self.cell_house_idx)
+            u, scratch_gate = self.vf.ambient_u(
+                x, y, self.pe, self.cell_house_idx, self.poles
+            )
+            scratch_gates.append(scratch_gate)
+            # Blank-only ‖v_tan‖² outside geodesic_step (clue u is unconstrained noise).
+            v_tan = u - (x * u).sum(dim=-1, keepdim=True) * x
+            v_sq = v_tan.square().sum(dim=-1)
+            v_tan_sqs.append((v_sq * blank_f).sum() / blank_denom)
             x = geodesic_step(x, u, x0, is_clue)
             states.append(x)
         self._last_omegas = omegas
         self._last_is_clue = is_clue
+        self._last_v_tan_sqs = v_tan_sqs
+        self._last_scratch_gates = scratch_gates
         return x, omegas, states
 
     @staticmethod
@@ -141,6 +155,8 @@ class BipartiteSnTmSolver(nn.Module):
         p9 = self.poles[:, :N_DIGITS]
         q = F.relu(x[..., :N_DIGITS] @ p9.T)
         claim_energy = q.square().mean()
+        v_tan_sqs = getattr(self, '_last_v_tan_sqs', None)
+        scratch_gates = getattr(self, '_last_scratch_gates', None)
 
         out: dict[str, Tensor] = {
             's': x,  # train/eval expect 's'; bipartite state is x on S^{63}
@@ -156,6 +172,11 @@ class BipartiteSnTmSolver(nn.Module):
             'claim_energy': claim_energy.detach(),
             'logit_scale': self.logit_scale.detach().clamp(max=LOGIT_SCALE_MAX),
         }
+        if v_tan_sqs:
+            out['v_tan_sq_1'] = v_tan_sqs[0].detach()
+            out['v_tan_sq_k'] = v_tan_sqs[-1].detach()
+        if scratch_gates:
+            out['scratch_gate_mean'] = scratch_gates[-1].mean().detach()
         if solution is None:
             return out
 
