@@ -284,3 +284,123 @@ def test_house_features_relu_mean_scale() -> None:
     in_y = 2 * D + 2 * N_DIGITS + emb_m
     assert in_y == 178
     assert vf.vf_y[0].in_features == 178
+
+
+def _parity_pack(seed: int = 7, batch: int = 4):
+    """Shared gather vs hard-A inputs + model with identical weights."""
+    from riemannian_sudoku.manifold_embed import hard_incidence_from_indices
+
+    torch.manual_seed(seed)
+    model = BipartiteSnTmSolver(num_steps=2)
+    puzzle = torch.randint(0, 10, (batch, 81))
+    x0, y0, is_clue = init_bipartite_state(puzzle, model.poles, model.pe)
+    a_s2t, a_t2s = hard_incidence_from_indices(model.house_cell_idx, model.cell_house_idx)
+    return model, puzzle, x0, y0, is_clue, a_s2t, a_t2s
+
+
+def test_hard_incidence_shapes_and_row_sum() -> None:
+    from riemannian_sudoku.manifold_embed import hard_incidence_from_indices
+
+    a_s2t, a_t2s = hard_incidence_from_indices()
+    assert a_s2t.shape == (27, 81) and a_t2s.shape == (81, 3, 27)
+    assert torch.allclose(a_s2t.sum(dim=1), torch.ones(27), atol=1e-6)
+    assert torch.allclose(a_t2s.sum(dim=-1), torch.ones(81, 3), atol=1e-6)
+    # Cell 0 → houses 0, 9, 18
+    assert a_t2s[0, :, [0, 9, 18]].sum() == 3.0
+
+
+def test_hard_a_forward_parity() -> None:
+    """house_features / omega / ambient_u / 1-step / K-step x_K gather vs hard-A."""
+    atol, rtol = 1e-5, 1e-4
+    model, _puzzle, x0, y0, is_clue, a_s2t, a_t2s = _parity_pack()
+    vf = model.vf
+    poles, pe = model.poles, model.pe
+    h_idx, c_idx = model.house_cell_idx, model.cell_house_idx
+
+    feat_g = vf.house_features(x0, poles, h_idx)
+    feat_a = vf.house_features_hard(x0, poles, a_s2t)
+    assert torch.allclose(feat_g, feat_a, atol=atol, rtol=rtol)
+
+    omega_g = vf.omega(x0, y0, poles, h_idx)
+    omega_a = vf.omega_hard(x0, y0, poles, a_s2t)
+    assert torch.allclose(omega_g, omega_a, atol=atol, rtol=rtol)
+
+    u_g, gate_g = vf.ambient_u(x0, y0, pe, c_idx, poles)
+    u_a, gate_a = vf.ambient_u_hard(x0, y0, pe, a_t2s, poles)
+    assert torch.allclose(u_g, u_a, atol=atol, rtol=rtol)
+    assert torch.allclose(gate_g, gate_a, atol=atol, rtol=rtol)
+
+    # 1-step x
+    from riemannian_sudoku.geodesic import geodesic_step, torus_step
+
+    y1_g = torus_step(y0, omega_g)
+    y1_a = torus_step(y0, omega_a)
+    u1_g, _ = vf.ambient_u(x0, y1_g, pe, c_idx, poles)
+    u1_a, _ = vf.ambient_u_hard(x0, y1_a, pe, a_t2s, poles)
+    x1_g = geodesic_step(x0, u1_g, x0, is_clue)
+    x1_a = geodesic_step(x0, u1_a, x0, is_clue)
+    assert torch.allclose(x1_g, x1_a, atol=atol, rtol=rtol)
+
+    # K-step via core
+    model.core.num_steps = 2
+    xk_a, _, _, _, _ = model.core.integrate(x0, y0, is_clue, pe, a_s2t, a_t2s, poles)
+    xk_g, _, _, _, _ = model.core.integrate_gather(x0, y0, is_clue, pe, h_idx, c_idx, poles)
+    assert torch.allclose(xk_g, xk_a, atol=atol, rtol=rtol)
+
+
+def test_hard_a_backward_parity() -> None:
+    """1-step and K-step grads on vf_y / vf_x* match gather vs hard-A."""
+    atol, rtol = 1e-5, 1e-4
+    model, puzzle, x0, y0, is_clue, a_s2t, a_t2s = _parity_pack(seed=11)
+    solution = torch.randint(1, 10, puzzle.shape)
+    mask = (puzzle == 0).float()
+    poles, pe = model.poles, model.pe
+    h_idx, c_idx = model.house_cell_idx, model.cell_house_idx
+    label_smoothing = max(0.0, 1.0 - model.ce_gamma)
+
+    def _grads(hard: bool, steps: int):
+        model.zero_grad(set_to_none=True)
+        model.core.num_steps = steps
+        if hard:
+            x, omegas, _, _, _ = model.core.integrate(
+                x0, y0, is_clue, pe, a_s2t, a_t2s, poles
+            )
+        else:
+            x, omegas, _, _, _ = model.core.integrate_gather(
+                x0, y0, is_clue, pe, h_idx, c_idx, poles
+            )
+        logits = model._logits(x)
+        loss = model._blank_ce(logits, solution, mask, label_smoothing)
+        # Touch ω so vf_y is in the graph even if CE depends only on x.
+        loss = loss + 0.0 * omegas[-1].sum()
+        loss.backward()
+        grads = {
+            n: p.grad.detach().clone()
+            for n, p in model.named_parameters()
+            if p.grad is not None and (n.startswith('vf.vf_y') or n.startswith('vf.vf_x') or n.startswith('vf.x_in'))
+        }
+        return grads
+
+    for steps in (1, 2):
+        g_g = _grads(hard=False, steps=steps)
+        g_a = _grads(hard=True, steps=steps)
+        assert g_g.keys() == g_a.keys()
+        for name in g_g:
+            assert torch.allclose(g_g[name], g_a[name], atol=atol, rtol=rtol), (
+                f'steps={steps} {name} max_abs={(g_g[name] - g_a[name]).abs().max().item()}'
+            )
+
+
+def test_sudoku_adapter_pack() -> None:
+    from riemannian_sudoku.manifold_embed import SudokuProblemAdapter
+
+    poles = simplex_etf_poles()
+    pe = torus_t3_pe()
+    adapter = SudokuProblemAdapter(poles, pe)
+    puzzle = torch.randint(0, 10, (2, 81))
+    x0, is_clue, pe_o, a_s2t, a_t2s, poles_o, y0 = adapter.encode(puzzle)
+    assert x0.shape == (2, 81, D) and y0.shape == (2, 27, M)
+    assert is_clue.shape == (2, 81) and pe_o.shape == (81, 6)
+    assert a_s2t.shape == (27, 81) and a_t2s.shape == (81, 3, 27)
+    assert poles_o.shape == (9, D)
+

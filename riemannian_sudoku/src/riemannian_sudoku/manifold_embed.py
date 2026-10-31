@@ -46,11 +46,93 @@ def simplex_etf_poles(n: int = N_DIGITS, d: int = D) -> Tensor:
 
 def clifford_embed(y: Tensor) -> Tensor:
     """
-    Clifford torus lift: unwrapped angles ``(..., M)`` → unit embed ``(..., 2M)``.
+    Clifford torus lift: unwrapped angles ``(..., m)`` → unit embed ``(..., 2m)``.
 
-    ``cat([cos(y), sin(y)], -1) * M^{-1/2}``; ``‖y_emb‖₂ ≡ 1``.
+    ``cat([cos(y), sin(y)], -1) * m^{-1/2}`` with ``m = y.shape[-1]``;
+    ``‖y_emb‖₂ ≡ 1``.
     """
-    return torch.cat([torch.cos(y), torch.sin(y)], dim=-1) * (M**-0.5)
+    m = y.shape[-1]
+    return torch.cat([torch.cos(y), torch.sin(y)], dim=-1) * (m**-0.5)
+
+
+def hard_incidence_from_indices(
+    house_cells: Tensor | None = None,
+    cell_houses: Tensor | None = None,
+    *,
+    n_cells: int = 81,
+    n_houses: int = 27,
+) -> tuple[Tensor, Tensor]:
+    """
+    Build hard bipartite incidence ``(A_s2t, A_t2s)`` from index buffers.
+
+    ``A_s2t`` ∈ R^{H×N} (default 27×81): row-stochastic (entries ``1/9``) for
+    S→T ``house_features``. ``A_t2s`` ∈ R^{N×K_inc×H} (81×3×27) one-hot for
+    T→S concat; houses are blocks ``[0:9, 9:18, 18:27]`` (row/col/box).
+    ``A_t2s`` is the block-structured transpose of hard incidence (Phase 2
+    multi-head routing slots onto the same ``K_inc`` axis).
+    """
+    if house_cells is None:
+        house_cells = house_cell_idx()
+    if cell_houses is None:
+        cell_houses = cell_house_idx()
+    h, c0 = house_cells.shape
+    n, k_inc = cell_houses.shape
+    if h != n_houses or n != n_cells:
+        raise ValueError(
+            f'index shapes ({h},{c0})/({n},{k_inc}) vs n_houses={n_houses} n_cells={n_cells}'
+        )
+    # S→T: each house row averages its C0 cells.
+    a_s2t = torch.zeros(n_houses, n_cells, dtype=torch.float32)
+    house_rows = torch.arange(n_houses).unsqueeze(1).expand(-1, c0)
+    a_s2t[house_rows, house_cells.long()] = 1.0 / float(c0)
+    # T→S: one-hot over houses for each (cell, incidence-slot).
+    a_t2s = torch.zeros(n_cells, k_inc, n_houses, dtype=torch.float32)
+    cell_rows = torch.arange(n_cells).unsqueeze(1).expand(-1, k_inc)
+    slot = torch.arange(k_inc).unsqueeze(0).expand(n_cells, -1)
+    a_t2s[cell_rows, slot, cell_houses.long()] = 1.0
+    return a_s2t, a_t2s
+
+
+class SudokuProblemAdapter:
+    """
+    Sudoku → attractor pack: ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)``.
+
+    Identical to ``init_bipartite_state`` + static hard incidence from indices.
+    Hard clue clamp only; no learned encoder / soft α.
+    """
+
+    def __init__(
+        self,
+        poles: Tensor,
+        pe: Tensor,
+        *,
+        pe_alpha: float = PE_ALPHA,
+        house_cells: Tensor | None = None,
+        cell_houses: Tensor | None = None,
+    ) -> None:
+        self.poles = poles
+        self.pe = pe
+        self.pe_alpha = pe_alpha
+        a_s2t, a_t2s = hard_incidence_from_indices(house_cells, cell_houses)
+        self.a_s2t = a_s2t
+        self.a_t2s = a_t2s
+
+    def encode(self, puzzle: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Return ``(x0, is_clue, pe, A_s2t, A_t2s, poles, y0)`` on ``puzzle`` device."""
+        x0, y0, is_clue = init_bipartite_state(
+            puzzle, self.poles, self.pe, pe_alpha=self.pe_alpha
+        )
+        device = puzzle.device
+        dtype = x0.dtype
+        return (
+            x0,
+            is_clue,
+            self.pe.to(device=device, dtype=dtype),
+            self.a_s2t.to(device=device, dtype=dtype),
+            self.a_t2s.to(device=device, dtype=dtype),
+            self.poles.to(device=device, dtype=dtype),
+            y0,
+        )
 
 
 def torus_t3_pe(pe_dim: int = PE_DIM) -> Tensor:
