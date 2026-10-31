@@ -35,6 +35,11 @@ def main() -> int:
         action='store_true',
         help='Also damp u_c (S^{54}); never damps u_x',
     )
+    p.add_argument(
+        '--compile',
+        action='store_true',
+        help='wrap model.forward with torch.compile(mode=default)',
+    )
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -54,7 +59,7 @@ def main() -> int:
     print(f'VAL_N={len(val_df)}')
     print(
         f'DAMP_START={args.damp_start} BETA={args.damp_beta} '
-        f'GAMMA={args.damp_gamma} UC={int(args.damp_uc)}'
+        f'GAMMA={args.damp_gamma} UC={int(args.damp_uc)} COMPILE={int(args.compile)}'
     )
     for k in args.ks:
         model = build_solver(
@@ -69,6 +74,8 @@ def main() -> int:
         model.eval_damp_gamma = float(args.damp_gamma)
         model.eval_damp_uc = bool(args.damp_uc)
         model.to(device)
+        if args.compile:
+            model.forward = torch.compile(model.forward, mode='default')  # type: ignore[method-assign]
         m = evaluate(model, loader, device)
         print(
             f"K={k} BLANK={m['blank_acc']:.6f} ROW={m['row_acc']:.6f} "
