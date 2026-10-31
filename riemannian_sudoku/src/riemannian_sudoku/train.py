@@ -285,27 +285,51 @@ def train_cmd(args: argparse.Namespace) -> None:
     args.pe_mode = pe_mode
     args.routing_mode = routing_mode
 
-    # Phase-2 gate inits: pin GT families / hold τ (no N(0,σ) on pinned).
-    if routing_mode == 'soft_sinkhorn' and hasattr(model, 'router'):
+    # Phase-2 / Phase-3 gate inits: pin GT families / hold τ (no N(0,σ) on pinned).
+    mixer_name = str(args.mixer)
+    soft_route = routing_mode == 'soft_sinkhorn' or mixer_name == 'multibank_attractor'
+    if soft_route and hasattr(model, 'router'):
         from riemannian_sudoku.manifold_embed import gt_family_logits
 
         gate_init = str(getattr(args, 'routing_init', 'random') or 'random')
         gt = gt_family_logits(boost=float(getattr(args, 'gt_boost', 2.0)))
-        if gate_init == 'gt_pinned':
-            model.router.pin_families(gt, families=[0, 1, 2])
-            logger.info('Routing init: all families pinned GT +%.2f (no noise)', float(getattr(args, 'gt_boost', 2.0)))
-        elif gate_init == 'partial_blind':
-            model.router.pin_families(gt, families=[0, 1])
-            with torch.no_grad():
-                model.router.logits[2].normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
-            logger.info('Routing init: pin families 0–1 GT; family 2 ~ N(0, σ²)')
-        elif gate_init == 'full_blind':
-            model.router.clear_pins()
-            with torch.no_grad():
-                model.router.logits.normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
-            logger.info('Routing init: full-blind Φ ~ N(0, σ²)')
+        if mixer_name == 'multibank_attractor':
+            # Pin S0–T1 (primary); leave S0–T2 / S1 edges free to depth-sep or prune.
+            if gate_init == 'gt_pinned':
+                model.router.pin_s0_edge('S0_T1', gt, families=[0, 1, 2])
+                model.router.pin_s0_edge('S0_T2', gt, families=[0, 1, 2])
+                logger.info('MultiBank: S0–T1/T2 all heads GT-pinned +%.2f', float(getattr(args, 'gt_boost', 2.0)))
+            elif gate_init == 'partial_blind':
+                model.router.pin_s0_edge('S0_T1', gt, families=[0, 1])
+                with torch.no_grad():
+                    model.router.phi_S0_T1[2].normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+                    model.router.phi_S0_T2.normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+                logger.info('MultiBank: S0–T1 pin 0–1; S0–T1[2]+S0–T2 ~ N(0,σ²)')
+            elif gate_init == 'full_blind':
+                model.router.clear_pins()
+                with torch.no_grad():
+                    sig = float(getattr(args, 'sigma_init', 0.5))
+                    model.router.phi_S0_T1.normal_(0.0, sig)
+                    model.router.phi_S0_T2.normal_(0.0, sig)
+                    model.router.phi_S1_T1.normal_(0.0, sig)
+                    model.router.phi_S1_T2.normal_(0.0, sig)
+                logger.info('MultiBank: full-blind Φ ~ N(0, σ²)')
+        else:
+            if gate_init == 'gt_pinned':
+                model.router.pin_families(gt, families=[0, 1, 2])
+                logger.info('Routing init: all families pinned GT +%.2f (no noise)', float(getattr(args, 'gt_boost', 2.0)))
+            elif gate_init == 'partial_blind':
+                model.router.pin_families(gt, families=[0, 1])
+                with torch.no_grad():
+                    model.router.logits[2].normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+                logger.info('Routing init: pin families 0–1 GT; family 2 ~ N(0, σ²)')
+            elif gate_init == 'full_blind':
+                model.router.clear_pins()
+                with torch.no_grad():
+                    model.router.logits.normal_(0.0, float(getattr(args, 'sigma_init', 0.5)))
+                logger.info('Routing init: full-blind Φ ~ N(0, σ²)')
         tau_hold = getattr(args, 'tau_hold', None)
-        if tau_hold is not None:
+        if tau_hold is not None and hasattr(model, 'curr_tau'):
             model.curr_tau.fill_(float(tau_hold))
             logger.info('τ held at %.4f', float(tau_hold))
 
@@ -320,12 +344,18 @@ def train_cmd(args: argparse.Namespace) -> None:
         logger.info('VF parameters (excl. router Φ): %s', f'{model.vf_param_count():,}')
 
     # Two-timescale AdamW: VF group + soft router Φ (wd=0, LR warm-up 0→5×lr).
-    router_params = [
-        p for n, p in model.named_parameters() if p.requires_grad and n.startswith('router.logits')
-    ]
-    vf_params = [
-        p for n, p in model.named_parameters() if p.requires_grad and not n.startswith('router.logits')
-    ]
+    def _is_router_param(n: str) -> bool:
+        if n.startswith('router.logits'):
+            return True
+        # Phase-3 MultiBankRouter: Φ / dust / β / h (not pinned buffers).
+        if n.startswith('router.phi_') or n.startswith('router.dust_'):
+            return True
+        if n.startswith('router.beta_') or n.startswith('router.h_'):
+            return True
+        return False
+
+    router_params = [p for n, p in model.named_parameters() if p.requires_grad and _is_router_param(n)]
+    vf_params = [p for n, p in model.named_parameters() if p.requires_grad and not _is_router_param(n)]
     if router_params:
         opt = torch.optim.AdamW(
             [
@@ -449,7 +479,10 @@ def train_cmd(args: argparse.Namespace) -> None:
         mask = batch['mask'].to(device, non_blocking=nb)
 
         # Compile-safe schedule: 0-D buffers via .fill_() (no Python if inside forward).
-        soft = str(getattr(args, 'routing_mode', 'hard')) == 'soft_sinkhorn'
+        soft = (
+            str(getattr(args, 'routing_mode', 'hard')) == 'soft_sinkhorn'
+            or str(getattr(args, 'mixer', '')) == 'multibank_attractor'
+        )
         if soft and hasattr(model, 'curr_tau'):
             tau_hold = getattr(args, 'tau_hold', None)
             if tau_hold is not None:
@@ -460,6 +493,11 @@ def train_cmd(args: argparse.Namespace) -> None:
             ent_on = step > int(0.2 * args.steps)
             ent_w = float(getattr(args, 'ent_weight', LAMBDA_ENT_DEFAULT)) if ent_on else 0.0
             model.curr_ent_weight.fill_(ent_w)
+        if soft and hasattr(model, 'curr_gamma'):
+            from riemannian_sudoku.manifold_bank import gamma_anneal
+
+            gmax = float(getattr(model, 'gamma_max', 1.0))
+            model.curr_gamma.fill_(gamma_anneal(step, gamma_max=gmax))
         if soft and len(opt.param_groups) > 1:
             # Router LR linear 0→5×lr_vf over first 500 steps (wd=0 group).
             warm = min(1.0, float(step) / 500.0)
@@ -522,6 +560,18 @@ def train_cmd(args: argparse.Namespace) -> None:
             ('sudoku_graph_purity', 'train/sudoku_graph_purity'),
             ('ortho_loss', 'train/ortho_loss'),
             ('ent_loss', 'train/ent_loss'),
+            ('curr_gamma', 'train/curr_gamma'),
+            ('alpha_S0_T1', 'train/alpha_S0_T1'),
+            ('alpha_S0_T2', 'train/alpha_S0_T2'),
+            ('alpha_S1_T1', 'train/alpha_S1_T1'),
+            ('alpha_S1_T2', 'train/alpha_S1_T2'),
+            ('h_T1', 'train/h_T1'),
+            ('h_T2', 'train/h_T2'),
+            ('h_S1', 'train/h_S1'),
+            ('sudoku_graph_purity_T1', 'train/sudoku_graph_purity_T1'),
+            ('sudoku_graph_purity_T2', 'train/sudoku_graph_purity_T2'),
+            ('beta_l1', 'train/beta_l1'),
+            ('beta_l0', 'train/beta_l0'),
         ):
             if key in out:
                 metrics[wandb_key] = float(out[key])
@@ -542,6 +592,23 @@ def train_cmd(args: argparse.Namespace) -> None:
                 metrics['train/gauge_kinetic'],
                 blank_acc,
             )
+            if 'train/sudoku_graph_purity' in metrics:
+                logger.info(
+                    'step %d routing purity=%.4f T1=%.4f T2=%.4f gamma=%.4f '
+                    'aS0T1=%.3f aS0T2=%.3f aS1T1=%.3f aS1T2=%.3f hT1=%.3f hT2=%.3f hS1=%.3f',
+                    step,
+                    metrics.get('train/sudoku_graph_purity', float('nan')),
+                    metrics.get('train/sudoku_graph_purity_T1', float('nan')),
+                    metrics.get('train/sudoku_graph_purity_T2', float('nan')),
+                    metrics.get('train/curr_gamma', float('nan')),
+                    metrics.get('train/alpha_S0_T1', float('nan')),
+                    metrics.get('train/alpha_S0_T2', float('nan')),
+                    metrics.get('train/alpha_S1_T1', float('nan')),
+                    metrics.get('train/alpha_S1_T2', float('nan')),
+                    metrics.get('train/h_T1', float('nan')),
+                    metrics.get('train/h_T2', float('nan')),
+                    metrics.get('train/h_S1', float('nan')),
+                )
             if wandb_run is not None:
                 wandb_run.log(metrics, step=step)
 
@@ -809,6 +876,7 @@ def main() -> None:
             'geo_log',
             'geo_transformer',
             'bipartite_sn_tm',
+            'multibank_attractor',
         ],
         help='velocity mixer (default euclid_axial; on --resume reads ckpt args unless set)',
     )
@@ -919,6 +987,7 @@ def main() -> None:
             'geo_log',
             'geo_transformer',
             'bipartite_sn_tm',
+            'multibank_attractor',
         ],
         help='override mixer; default reads ckpt args',
     )
